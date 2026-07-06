@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -36,9 +37,37 @@ type streamChunkOutput struct {
 	Payload []byte `json:"payload"`
 }
 
+type streamEmitRequest struct {
+	StreamID string `json:"stream_id"`
+	Payload  []byte `json:"payload"`
+	Error    string `json:"error,omitempty"`
+}
+
+type streamCloseRequest struct {
+	StreamID string `json:"stream_id"`
+	Error    string `json:"error,omitempty"`
+}
+
+func emitChunk(streamID string, payload []byte) {
+	if streamID == "" || len(payload) == 0 {
+		return
+	}
+	_, _ = callHost(pluginabi.MethodHostStreamEmit, streamEmitRequest{
+		StreamID: streamID,
+		Payload:  payload,
+	})
+}
+
+func closeStream(streamID, errMsg string) {
+	if streamID == "" {
+		return
+	}
+	_, _ = callHost(pluginabi.MethodHostStreamClose, streamCloseRequest{StreamID: streamID, Error: errMsg})
+}
+
 type streamResponseOutput struct {
-	Headers http.Header              `json:"headers,omitempty"`
-	Chunks  []streamChunkOutput      `json:"chunks,omitempty"`
+	Headers http.Header         `json:"headers,omitempty"`
+	Chunks  []streamChunkOutput `json:"chunks,omitempty"`
 }
 
 // routeModel decides whether to intercept this request.
@@ -108,12 +137,18 @@ func executeStream(raw []byte) ([]byte, error) {
 		return nil, fmt.Errorf("decode executor.execute_stream request: %w", err)
 	}
 
+	streamID := strings.TrimSpace(req.StreamID)
+	if streamID == "" {
+		return errorEnvelope("executor_error", "stream_id is required for executor.execute_stream"), nil
+	}
+
 	baseBody := map[string]any{}
 	bodyBytes := req.OriginalRequest
 	if len(req.Payload) > 0 {
 		bodyBytes = req.Payload
 	}
 	if err := json.Unmarshal(bodyBytes, &baseBody); err != nil {
+		closeStream(streamID, "decode request body: "+err.Error())
 		return nil, fmt.Errorf("decode request body: %w", err)
 	}
 
@@ -124,74 +159,67 @@ func executeStream(raw []byte) ([]byte, error) {
 		origInput = append([]any(nil), origInput...)
 	}
 
-	var allChunks []streamChunkOutput
-	var respHeaders http.Header
+	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				closeStream(streamID, fmt.Sprintf("fold panic: %v", recovered))
+			}
+		}()
+		runFold(baseBody, origInput, req, streamID)
+		closeStream(streamID, "")
+	}()
 
+	return okEnvelope(map[string]any{
+		"headers": http.Header{"Content-Type": []string{"text/event-stream"}},
+	})
+}
+
+func runFold(baseBody map[string]any, origInput []any, req rpcExecutorRequest, streamID string) {
 	foldState := newFoldState(baseBody, origInput, req, req.HostCallbackID)
 
 	for {
-		roundChunks, roundHeaders, terminal, usage, roundErr := foldState.openRound()
+		roundChunks, _, terminal, usage, roundErr := foldState.openRound()
 		if roundErr != nil {
 			if foldState.roundNo == 0 {
-				return okEnvelope(streamResponseOutput{
-					Headers: roundHeaders,
-					Chunks:  []streamChunkOutput{{Payload: sseEvent(failedEvent(502, roundErr.Error()))}},
-				})
+				emitChunk(streamID, sseEvent(failedEvent(502, roundErr.Error())))
+				return
 			}
-			allChunks = append(allChunks, streamChunkOutput{Payload: sseEvent(foldState.incompleteEvent("upstream_error"))})
-			break
-		}
-		if respHeaders == nil {
-			respHeaders = roundHeaders
+			emitChunk(streamID, sseEvent(foldState.incompleteEvent("upstream_error")))
+			return
 		}
 
 		for _, ch := range roundChunks {
-			allChunks = append(allChunks, ch)
+			emitChunk(streamID, ch.Payload)
 		}
 
 		if terminal == nil {
-			allChunks = append(allChunks, streamChunkOutput{Payload: sseEvent(foldState.incompleteEvent("upstream_eof"))})
-			break
+			emitChunk(streamID, sseEvent(foldState.incompleteEvent("upstream_eof")))
+			return
 		}
 
 		foldState.endRound(terminal, usage)
 
 		if foldState.shouldContinue() {
 			if err := foldState.prepareNextRound(); err != nil {
-				allChunks = append(allChunks, streamChunkOutput{Payload: sseEvent(foldState.incompleteEvent("upstream_error"))})
-				break
+				emitChunk(streamID, sseEvent(foldState.incompleteEvent("upstream_error")))
+				return
 			}
 			continue
 		}
 
 		flushChunks := foldState.flushCleanStop()
 		for _, ch := range flushChunks {
-			allChunks = append(allChunks, ch)
+			emitChunk(streamID, ch.Payload)
 		}
-		allChunks = append(allChunks, streamChunkOutput{Payload: sseEvent(foldState.terminalEvent())})
-		break
+		emitChunk(streamID, sseEvent(foldState.terminalEvent()))
+		return
 	}
-
-	if respHeaders == nil {
-		respHeaders = http.Header{"Content-Type": []string{"text/event-stream"}}
-	} else {
-		if respHeaders.Get("Content-Type") == "" {
-			respHeaders.Set("Content-Type", "text/event-stream")
-		}
-	}
-
-	return okEnvelope(streamResponseOutput{Headers: respHeaders, Chunks: allChunks})
 }
 
 // sseEvent serializes an event dict as an SSE data line.
 func sseEvent(ev map[string]any) []byte {
 	raw, _ := json.Marshal(ev)
 	return append([]byte("data: "), append(raw, '\n', '\n')...)
-}
-
-// sseDone returns the SSE terminal sentinel.
-func sseDone() []byte {
-	return []byte("data: [DONE]\n\n")
 }
 
 // foldState tracks the state across multiple rounds of the fold.
