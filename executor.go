@@ -71,7 +71,10 @@ func routeModel(raw []byte) ([]byte, error) {
 	if req.RequestedModel != "gpt-5.5" {
 		return okEnvelope(pluginapi.ModelRouteResponse{Handled: false})
 	}
-	if req.SourceFormat != "openai-response" {
+	switch req.SourceFormat {
+	case "openai-response", "openai", "claude":
+		// accepted: CPA adapter will translate to/from codex internally
+	default:
 		return okEnvelope(pluginapi.ModelRouteResponse{Handled: false})
 	}
 	if !req.Stream {
@@ -87,12 +90,14 @@ func routeModel(raw []byte) ([]byte, error) {
 		return okEnvelope(pluginapi.ModelRouteResponse{Handled: false})
 	}
 
-	input, ok := body["input"]
-	if !ok {
-		return okEnvelope(pluginapi.ModelRouteResponse{Handled: false})
-	}
-	if _, isArray := input.([]any); !isArray {
-		return okEnvelope(pluginapi.ModelRouteResponse{Handled: false})
+	if req.SourceFormat == "openai-response" {
+		input, ok := body["input"]
+		if !ok {
+			return okEnvelope(pluginapi.ModelRouteResponse{Handled: false})
+		}
+		if _, isArray := input.([]any); !isArray {
+			return okEnvelope(pluginapi.ModelRouteResponse{Handled: false})
+		}
 	}
 
 	return okEnvelope(pluginapi.ModelRouteResponse{
@@ -114,8 +119,8 @@ func execute(raw []byte) ([]byte, error) {
 	}
 
 	result, err := callHost(pluginabi.MethodHostModelExecute, hostModelExecRequest{
-		EntryProtocol:  req.SourceFormat,
-		ExitProtocol:   req.SourceFormat,
+		EntryProtocol:  "codex",
+		ExitProtocol:   "codex",
 		Model:          req.Model,
 		Stream:         false,
 		Body:           body,
@@ -319,8 +324,8 @@ func (fs *foldState) openRound(streamID string) (map[string]any, map[string]any,
 	}
 
 	result, err := callHost(pluginabi.MethodHostModelExecuteStream, hostModelExecRequest{
-		EntryProtocol:  fs.req.SourceFormat,
-		ExitProtocol:   fs.req.SourceFormat,
+		EntryProtocol:  "codex",
+		ExitProtocol:   "codex",
 		Model:          fs.req.Model,
 		Stream:         true,
 		Body:           bodyBytes,

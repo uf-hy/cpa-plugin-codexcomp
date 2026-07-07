@@ -5,7 +5,7 @@
 
 [简体中文](README.md) | [English](README_EN.md)
 
-A [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) plugin that detects and repairs gpt-5.5 reasoning truncation in streaming Responses API requests to reduce occasional model degradation
+A [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) plugin that detects and repairs gpt-5.5 reasoning truncation in streaming requests to reduce occasional model degradation, supporting OpenAI Responses API, OpenAI Chat Completions API, and Anthropic Messages API client protocols
 
 In agent scenarios, gpt-5.5 reasoning tokens can stop exactly at 518n−2 (516, 1034, 1552, ...). This truncation can cause unexpected degradation. When the plugin detects this kind of truncation, it replays encrypted_content to continue reasoning, then folds multiple rounds into a single response that stays fully transparent to the downstream client.
 
@@ -19,7 +19,7 @@ Please install the CPA plugin codexcomp for me. Installation instructions are at
 
 ## How It Works
 
-The plugin intercepts gpt-5.5 streaming Responses API requests through CPA's C ABI plugin system and each time the upstream request finishes, checks whether reasoning_tokens matches the 518n−2 pattern. If it matches and encrypted_content exists, it triggers continuation
+The plugin intercepts gpt-5.5 streaming requests through CPA's C ABI plugin system, communicating with the upstream in codex format internally. Each time the upstream request finishes, it checks whether reasoning_tokens matches the 518n−2 pattern. If it matches and encrypted_content exists, it triggers continuation
 
 The continuation round replays the original input, all previous thinking content, and a prompt message so the model continues from the truncation point rather than starting over
 
@@ -34,12 +34,11 @@ gpt-5.5 with high reasoning effort can take 25-30 seconds before the first SSE e
 The plugin only intercepts requests that match **all** of:
 
 - Model is `gpt-5.5`
-- Source format is `openai-response` (Responses API)
+- Client protocol is `openai-response` (Responses API), `openai` (Chat Completions API), or `claude` (Anthropic Messages API)
 - Request is streaming (`stream: true`)
-- `input` is a JSON array (Codex-style)
 - No `previous_response_id` present
 
-All other requests pass through to CPA's normal routing.
+The plugin communicates with the upstream exclusively in codex format. CPA's adapter layer automatically handles bidirectional translation between the client protocol and codex, making the fold transparent to downstream clients. All other requests pass through to CPA's normal routing.
 
 ## How This Differs From codexcomp / CodexCont
 

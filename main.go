@@ -219,8 +219,8 @@ func pluginRegistration() registration {
 			ModelRouter:           true,
 			Executor:              true,
 			ExecutorModelScope:    string(pluginapi.ExecutorModelScopeBoth),
-			ExecutorInputFormats:  []string{"responses"},
-			ExecutorOutputFormats: []string{"responses"},
+			ExecutorInputFormats:  []string{"codex"},
+			ExecutorOutputFormats: []string{"codex"},
 		},
 	}
 }
