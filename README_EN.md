@@ -5,9 +5,9 @@
 
 [简体中文](README.md) | [English](README_EN.md)
 
-A [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) plugin that detects and repairs gpt-5.5 reasoning truncation in streaming Responses API requests.
+A [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) plugin that detects and repairs gpt-5.5 reasoning truncation in streaming Responses API requests to reduce occasional model degradation
 
-gpt-5.5 in agent scenarios frequently stops reasoning at exactly `518n−2` tokens (516, 1034, 1552, ...) — a model-side scheduling behavior, not a context-window limit. This causes unexpected reasoning degradation. This plugin detects the truncation, continues reasoning via `encrypted_content` replay, and folds multiple rounds into a single response transparent to the downstream client.
+In agent scenarios, gpt-5.5 reasoning tokens can stop exactly at 518n−2 (516, 1034, 1552, ...). This truncation can cause unexpected degradation. When the plugin detects this kind of truncation, it replays encrypted_content to continue reasoning, then folds multiple rounds into a single response that stays fully transparent to the downstream client.
 
 ## Quick Install (Agent)
 
@@ -19,11 +19,11 @@ Please install the CPA plugin codexcomp for me. Installation instructions are at
 
 ## How It Works
 
-1. **Intercept**: The plugin registers as a `model_router` + `executor` via CPA's C ABI plugin system, intercepting `gpt-5.5` streaming Responses API requests.
-2. **Detect**: After each upstream round completes, it checks `reasoning_tokens` against the `518n−2` pattern. If matched and `encrypted_content` is present, a continuation round is triggered.
-3. **Continue**: The continuation round replays the original input plus all previous reasoning items (with `encrypted_content`) and a `phase: commentary` nudge message (`Continue thinking...`). The model resumes from the truncation point instead of restarting.
-4. **Fold**: Up to 3 continuation rounds are attempted. Reasoning events are streamed live to the downstream client. Non-reasoning output (message, tool calls) is buffered per round and only flushed when a clean (non-truncated) round completes.
-5. **Reconstruct**: The final `response.completed` event is rebuilt with merged output, a folded single-response `usage` view (real multi-round billing in `metadata.proxy_billed_usage`), and fold metadata.
+The plugin intercepts gpt-5.5 streaming Responses API requests through CPA's C ABI plugin system and each time the upstream request finishes, checks whether reasoning_tokens matches the 518n−2 pattern. If it matches and encrypted_content exists, it triggers continuation
+
+The continuation round replays the original input, all previous thinking content, and a prompt message so the model continues from the truncation point rather than starting over
+
+By default, it allows up to 3 continuation rounds, trading possible extra time for relatively more thinking length and time, thereby improving model intelligence
 
 ### Async Streaming & First-Byte Latency
 
