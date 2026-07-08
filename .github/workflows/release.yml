@@ -46,7 +46,7 @@ jobs:
           CC: ${{ matrix.cc }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          go mod download
+          go mod tidy
           go build -trimpath -ldflags="-s -w -X main.pluginVersion=${VERSION}" -buildmode=c-shared -o codexcomp.so
 
       - name: Test (native only)
