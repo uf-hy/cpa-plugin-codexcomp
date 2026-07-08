@@ -55,28 +55,47 @@ The plugin communicates with the upstream exclusively in codex format. CPA's ada
 
 CodexCont is the original continuation mechanism. codexcomp refined it into a transport-agnostic fold. This plugin ports that fold logic to Go and integrates it directly into CPA's plugin system, eliminating the need for a separate proxy process.
 
-## Manual Installation
+## Installation
 
-Download the latest `.so` from [Releases](https://github.com/uf-hy/cpa-plugin-codexcomp/releases/latest):
+### Option 1: Plugin Store (recommended)
 
-- `codexcomp-linux-amd64.so` — Linux x86_64 (most common)
-- `codexcomp-linux-arm64.so` — Linux ARM64
+Add this repository as a third-party plugin source and install via the management API:
 
-```bash
-# Choose one command for the CPU architecture where CPA runs.
-# Linux x86_64:
-wget -qO <CPA_DIR>/plugins/codexcomp.so \
-  "https://github.com/uf-hy/cpa-plugin-codexcomp/releases/latest/download/codexcomp-linux-amd64.so"
+1. Add `store-sources` to the `plugins` section of `config.yaml`:
 
-# Linux ARM64:
-wget -qO <CPA_DIR>/plugins/codexcomp.so \
-  "https://github.com/uf-hy/cpa-plugin-codexcomp/releases/latest/download/codexcomp-linux-arm64.so"
+```yaml
+plugins:
+  enabled: true
+  dir: plugins
+  store-sources:
+    - "https://raw.githubusercontent.com/uf-hy/cpa-plugin-codexcomp/master/registry.json"
+  configs:
+    codexcomp:
+      enabled: true
+      priority: 1
 ```
 
-Enable the plugin:
+2. Restart CPA
 
-1. Put `codexcomp.so` in `<CPA_DIR>/plugins/`
-2. Enable plugins in `config.yaml`:
+3. Call the install endpoint:
+
+```bash
+curl -X POST "<CPA_URL>/v0/management/plugin-store/codexcomp/install" \
+  -H "Authorization: Bearer <MANAGEMENT_KEY>"
+```
+
+CPA will download the correct architecture `.so`, verify SHA256, and hot-reload — usually no second restart needed.
+
+### Option 2: Manual Installation
+
+Download the latest zip from [Releases](https://github.com/uf-hy/cpa-plugin-codexcomp/releases/latest), extract to the `plugins/` directory:
+
+```bash
+mkdir -p <CPA_DIR>/plugins
+unzip codexcomp_<version>_linux_<amd64|arm64>.zip -d <CPA_DIR>/plugins/
+```
+
+Enable the plugin in `config.yaml`:
 
 ```yaml
 plugins:
@@ -88,14 +107,14 @@ plugins:
       priority: 1
 ```
 
-3. If using Docker, mount the plugins directory in `docker-compose.yml`:
+If using Docker, mount the plugins directory in `docker-compose.yml`:
 
 ```yaml
 volumes:
-  - ./plugins:/CLIProxyAPI/plugins:ro
+  - ./plugins:/CLIProxyAPI/plugins
 ```
 
-4. Restart CPA.
+Restart CPA.
 
 For AI-agent-friendly installation steps, see [SETUP.md](SETUP.md).
 

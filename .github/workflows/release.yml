@@ -9,39 +9,14 @@ permissions:
   contents: write
 
 jobs:
-  build-amd64:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.26'
-
-      - name: Clone CLIProxyAPI SDK (latest release)
-        run: |
-          CPA_TAG=$(curl -s https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/latest | python3 -c "import sys,json;print(json.load(sys.stdin)['tag_name'])")
-          echo "Cloning CPA $CPA_TAG"
-          git clone --depth 1 --branch "$CPA_TAG" https://github.com/router-for-me/CLIProxyAPI.git /tmp/CLIProxyAPI
-
-      - name: Replace SDK path
-        run: sed -i "s|../CLIProxyAPI|/tmp/CLIProxyAPI|g" go.mod
-
-      - name: Build
-        env:
-          GOOS: linux
-          GOARCH: amd64
-          CGO_ENABLED: 1
-        run: |
-          go mod tidy
-          go build -trimpath -ldflags="-s -w" -buildmode=c-shared -o codexcomp-linux-amd64.so
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: codexcomp-linux-amd64.so
-          path: codexcomp-linux-amd64.so
-
-  build-arm64:
+  build:
+    strategy:
+      matrix:
+        include:
+          - goarch: amd64
+            cc: ''
+          - goarch: arm64
+            cc: aarch64-linux-gnu-gcc
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -51,6 +26,7 @@ jobs:
           go-version: '1.26'
 
       - name: Install ARM64 cross-compiler
+        if: matrix.goarch == 'arm64'
         run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
 
       - name: Clone CLIProxyAPI SDK (latest release)
@@ -65,20 +41,25 @@ jobs:
       - name: Build
         env:
           GOOS: linux
-          GOARCH: arm64
+          GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 1
-          CC: aarch64-linux-gnu-gcc
+          CC: ${{ matrix.cc }}
         run: |
           go mod tidy
-          go build -trimpath -ldflags="-s -w" -buildmode=c-shared -o codexcomp-linux-arm64.so
+          go build -trimpath -ldflags="-s -w" -buildmode=c-shared -o codexcomp.so
+
+      - name: Package zip
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          zip "codexcomp_${VERSION}_linux_${{ matrix.goarch }}.zip" codexcomp.so
 
       - uses: actions/upload-artifact@v4
         with:
-          name: codexcomp-linux-arm64.so
-          path: codexcomp-linux-arm64.so
+          name: codexcomp-linux-${{ matrix.goarch }}
+          path: codexcomp_*.zip
 
   release:
-    needs: [build-amd64, build-arm64]
+    needs: [build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -86,10 +67,14 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - name: Generate checksums
+        working-directory: artifacts
+        run: sha256sum codexcomp_*.zip > checksums.txt
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           files: |
-            artifacts/codexcomp-linux-amd64.so
-            artifacts/codexcomp-linux-arm64.so
+            artifacts/codexcomp_*.zip
+            artifacts/checksums.txt
