@@ -76,10 +76,14 @@ jobs:
         working-directory: artifacts
         run: sha256sum codexcomp_*.zip > checksums.txt
 
+      - name: Read tag message
+        id: tagmsg
+        run: git tag -l --format='%(contents)' ${{ github.ref_name }} > /tmp/release_notes.md
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          body_path: /tmp/release_notes.md
           files: |
             artifacts/codexcomp_*.zip
             artifacts/checksums.txt
