@@ -302,6 +302,25 @@ func toFloat(v any) float64 {
 	}
 }
 
+// cloneUsage returns a deep copy of a usage map.
+// foldState stores usage references from upstream events; without cloning,
+// a reused or mutated upstream event map would silently corrupt firstUsage
+// or the current round's usage (Go maps are reference types).
+func cloneUsage(m map[string]any) map[string]any {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		if sub, ok := v.(map[string]any); ok {
+			out[k] = cloneUsage(sub)
+		} else {
+			out[k] = v
+		}
+	}
+	return out
+}
+
 // hostModelExecRequest is the request sent to host.model.execute_stream.
 type hostModelExecRequest struct {
 	EntryProtocol  string      `json:"entry_protocol"`

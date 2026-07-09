@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha1"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -31,6 +32,60 @@ type hostModelStreamReadResponse struct {
 	Payload []byte `json:"payload"`
 	Error   string `json:"error"`
 	Done    bool   `json:"done"`
+}
+
+const (
+	cpaSessionHeader        = "X-CPA-Session-Id"
+	codexCompSessionHeader  = "X-CodexComp-Session-Id"
+	claudeCodeSessionHeader = "X-Claude-Code-Session-Id"
+)
+
+var sessionHeaders = []string{
+	cpaSessionHeader,
+	codexCompSessionHeader,
+	claudeCodeSessionHeader,
+}
+
+func extractSessionID(req rpcExecutorRequest) string {
+	for _, header := range sessionHeaders {
+		if sid := strings.TrimSpace(req.Headers.Get(header)); sid != "" {
+			return sid
+		}
+	}
+	if len(req.OriginalRequest) == 0 {
+		return ""
+	}
+	var payload struct {
+		Metadata struct {
+			UserID string `json:"user_id"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(req.OriginalRequest, &payload); err != nil {
+		return ""
+	}
+	userID := payload.Metadata.UserID
+	if userID == "" {
+		return ""
+	}
+	if strings.HasPrefix(userID, "{") {
+		var uid struct {
+			SessionID string `json:"session_id"`
+		}
+		if err := json.Unmarshal([]byte(userID), &uid); err == nil {
+			return strings.TrimSpace(uid.SessionID)
+		}
+		return ""
+	}
+	if idx := strings.LastIndex(userID, "_session_"); idx >= 0 {
+		return strings.TrimSpace(userID[idx+len("_session_"):])
+	}
+	return ""
+}
+
+func stablePromptCacheKey(model, sessionID string) string {
+	name := strings.Join([]string{"codexcomp", "prompt-cache", model, "session:" + sessionID}, ":")
+	h := sha1.Sum([]byte(name))
+	return fmt.Sprintf("%x", h)
 }
 
 type streamEmitRequest struct {
@@ -118,8 +173,18 @@ func execute(raw []byte) ([]byte, error) {
 		body = req.Payload
 	}
 
+	entryProtocol := "codex"
+	if sid := extractSessionID(req); sid != "" {
+		var bodyMap map[string]any
+		if err := json.Unmarshal(body, &bodyMap); err == nil {
+			bodyMap["prompt_cache_key"] = stablePromptCacheKey(req.Model, sid)
+			body, _ = json.Marshal(bodyMap)
+			entryProtocol = "openai-response"
+		}
+	}
+
 	result, err := callHost(pluginabi.MethodHostModelExecute, hostModelExecRequest{
-		EntryProtocol:  "codex",
+		EntryProtocol:  entryProtocol,
 		ExitProtocol:   "codex",
 		Model:          req.Model,
 		Stream:         false,
@@ -161,6 +226,11 @@ func executeStream(raw []byte) ([]byte, error) {
 		return okEnvelope(map[string]any{
 			"headers": http.Header{"Content-Type": []string{"text/event-stream"}},
 		})
+	}
+
+	sessionID := extractSessionID(req)
+	if sessionID != "" {
+		baseBody["prompt_cache_key"] = stablePromptCacheKey(req.Model, sessionID)
 	}
 
 	origInput, _ := baseBody["input"].([]any)
@@ -323,8 +393,13 @@ func (fs *foldState) openRound(streamID string) (map[string]any, map[string]any,
 		return nil, nil, nil, err
 	}
 
+	entryProtocol := "codex"
+	if _, hasKey := fs.baseBody["prompt_cache_key"]; hasKey {
+		entryProtocol = "openai-response"
+	}
+
 	result, err := callHost(pluginabi.MethodHostModelExecuteStream, hostModelExecRequest{
-		EntryProtocol:  "codex",
+		EntryProtocol:  entryProtocol,
 		ExitProtocol:   "codex",
 		Model:          fs.req.Model,
 		Stream:         true,
@@ -515,7 +590,7 @@ func (fs *foldState) processEvent(ev map[string]any, streamID string) (map[strin
 		fs.terminal = ev
 		if r, ok := ev["response"].(map[string]any); ok {
 			if u, ok := r["usage"].(map[string]any); ok {
-				fs.usage = u
+				fs.usage = cloneUsage(u)
 			}
 		}
 		return ev, nil
@@ -594,7 +669,7 @@ func (fs *foldState) endRound(terminal map[string]any, usage map[string]any) {
 	fs.usage = usage
 	sumUsage(fs.summedUsage, usage)
 	if fs.roundNo == 1 {
-		fs.firstUsage = usage
+		fs.firstUsage = cloneUsage(usage)
 	}
 
 	rt := reasoningTokens(usage)

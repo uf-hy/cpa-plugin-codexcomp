@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
 	"reflect"
 	"testing"
 
@@ -348,6 +349,41 @@ func TestAgentUsageFinalPartNegative(t *testing.T) {
 	usage := agentUsage(first, summed, finalRound, true)
 	if usage["output_tokens"].(float64) != 100 {
 		t.Errorf("output should be 100+0=100 (finalPart clamped), got %v", usage["output_tokens"])
+	}
+}
+
+func TestCloneUsageIsolation(t *testing.T) {
+	original := map[string]any{
+		"input_tokens":         float64(1000),
+		"input_tokens_details": map[string]any{"cached_tokens": float64(500)},
+		"output_tokens_details": map[string]any{
+			"reasoning_tokens": float64(516),
+		},
+	}
+	clone := cloneUsage(original)
+
+	original["input_tokens"] = float64(9999)
+	od, _ := original["input_tokens_details"].(map[string]any)
+	od["cached_tokens"] = float64(9999)
+	ood, _ := original["output_tokens_details"].(map[string]any)
+	ood["reasoning_tokens"] = float64(9999)
+
+	if clone["input_tokens"].(float64) != 1000 {
+		t.Errorf("clone input corrupted: got %v, want 1000", clone["input_tokens"])
+	}
+	cd, _ := clone["input_tokens_details"].(map[string]any)
+	if cd["cached_tokens"].(float64) != 500 {
+		t.Errorf("clone cached corrupted: got %v, want 500", cd["cached_tokens"])
+	}
+	cod, _ := clone["output_tokens_details"].(map[string]any)
+	if cod["reasoning_tokens"].(float64) != 516 {
+		t.Errorf("clone reasoning corrupted: got %v, want 516", cod["reasoning_tokens"])
+	}
+}
+
+func TestCloneUsageNil(t *testing.T) {
+	if cloneUsage(nil) != nil {
+		t.Error("cloneUsage(nil) should return nil")
 	}
 }
 
@@ -1369,6 +1405,87 @@ func TestRouteModelAcceptsClaude(t *testing.T) {
 	json.Unmarshal(result, &resp)
 	if !resp.Data.Handled {
 		t.Error("should accept claude for gpt-5.5")
+	}
+}
+
+func TestExtractSessionIDHeaderPriority(t *testing.T) {
+	headers := http.Header{}
+	headers.Set(cpaSessionHeader, " cpa-session ")
+	headers.Set(codexCompSessionHeader, "codexcomp-session")
+	headers.Set(claudeCodeSessionHeader, "claude-session")
+	req := rpcExecutorRequest{
+		ExecutorRequest: pluginapi.ExecutorRequest{
+			Headers:         headers,
+			OriginalRequest: []byte(`{"metadata":{"user_id":"body-session"}}`),
+		},
+	}
+
+	if got := extractSessionID(req); got != "cpa-session" {
+		t.Fatalf("extractSessionID() = %q, want cpa-session", got)
+	}
+}
+
+func TestExtractSessionIDHeaderFallbacks(t *testing.T) {
+	tests := []struct {
+		name   string
+		header string
+		value  string
+		want   string
+	}{
+		{
+			name:   "codexcomp header",
+			header: codexCompSessionHeader,
+			value:  "codexcomp-session",
+			want:   "codexcomp-session",
+		},
+		{
+			name:   "legacy claude code header",
+			header: claudeCodeSessionHeader,
+			value:  "claude-session",
+			want:   "claude-session",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			headers := http.Header{}
+			headers.Set(tt.header, tt.value)
+			req := rpcExecutorRequest{ExecutorRequest: pluginapi.ExecutorRequest{Headers: headers}}
+			if got := extractSessionID(req); got != tt.want {
+				t.Fatalf("extractSessionID() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractSessionIDMetadataFallback(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "plain user_id without session marker is ignored",
+			body: `{"metadata":{"user_id":"plain-user"}}`,
+			want: "",
+		},
+		{
+			name: "json encoded session_id",
+			body: `{"metadata":{"user_id":"{\"session_id\":\"json-session\"}"}}`,
+			want: "json-session",
+		},
+		{
+			name: "claude code suffix",
+			body: `{"metadata":{"user_id":"user_session_suffix-session"}}`,
+			want: "suffix-session",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := rpcExecutorRequest{ExecutorRequest: pluginapi.ExecutorRequest{OriginalRequest: []byte(tt.body)}}
+			if got := extractSessionID(req); got != tt.want {
+				t.Fatalf("extractSessionID() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

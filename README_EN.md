@@ -140,6 +140,16 @@ plugins:
 
 `debug_log` emits configuration and continuation-round details through CPA host log. It defaults to false and is intended for troubleshooting.
 
+### Stable cache for direct CPA clients
+
+When calling CPA's OpenAI-compatible endpoints directly (`/v1/chat/completions` or `/v1/responses`), send a stable `X-CPA-Session-Id` header for every request in the same conversation:
+
+```http
+X-CPA-Session-Id: your-stable-session-id
+```
+
+The plugin uses this value to derive the upstream `prompt_cache_key`, so multi-turn requests from the same conversation can hit prompt cache consistently. `X-CodexComp-Session-Id` and the legacy `X-Claude-Code-Session-Id` are also supported, but new integrations should prefer `X-CPA-Session-Id`.
+
 For a more aggressive nudge, see [openai/codex#30364](https://github.com/openai/codex/issues/30364#issuecomment-4828984707). Setting `marker_text` to `Spend time on thinking; you do not need to use the commentary channel to report progress to me.` more explicitly asks the model to spend time on thinking and not use the commentary channel for progress reports. Its effect may vary across clients and tasks, so test it in your own workload before enabling it.
 
 ## Metadata Injection

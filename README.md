@@ -141,6 +141,16 @@ plugins:
 
 `debug_log` 会通过 CPA 的 host log（宿主日志）输出配置和续写轮次信息，默认关闭，排障时再开。
 
+### 直连 CPA 的稳定缓存
+
+如果客户端直接调用 CPA 的 OpenAI 兼容接口（`/v1/chat/completions` 或 `/v1/responses`），建议每个会话都带上稳定的 `X-CPA-Session-Id` 请求头：
+
+```http
+X-CPA-Session-Id: your-stable-session-id
+```
+
+这个值用于生成上游 `prompt_cache_key`，让同一会话里的多轮请求稳定命中提示缓存。插件也兼容 `X-CodexComp-Session-Id` 和旧的 `X-Claude-Code-Session-Id`，但新接入建议使用 `X-CPA-Session-Id`。
+
 如果想尝试更强的续写提示，可以参考 [openai/codex#30364 的相关讨论](https://github.com/openai/codex/issues/30364#issuecomment-4828984707)，把 `marker_text` 换成 `Spend time on thinking; you do not need to use the commentary channel to report progress to me.`。它更明确地要求模型把时间花在 thinking（思考）上，不要把 commentary channel（进度汇报通道）用于报告进度。不同客户端和任务里的效果可能不同，建议按自己的场景测试后再启用。
 
 ## Metadata 注入
