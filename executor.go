@@ -40,6 +40,11 @@ const (
 	claudeCodeSessionHeader = "X-Claude-Code-Session-Id"
 )
 
+const (
+	continueReasonTruncation         = "truncation"
+	continueReasonLowReasoningTokens = "low_reasoning_tokens"
+)
+
 var sessionHeaders = []string{
 	cpaSessionHeader,
 	codexCompSessionHeader,
@@ -117,13 +122,23 @@ func closeStream(streamID, errMsg string) {
 	_, _ = callHost(pluginabi.MethodHostStreamClose, streamCloseRequest{StreamID: streamID, Error: errMsg})
 }
 
+func modelInAllowlist(model string) bool {
+	cfg := currentFoldConfig()
+	for _, m := range cfg.Models {
+		if m == model {
+			return true
+		}
+	}
+	return false
+}
+
 func routeModel(raw []byte) ([]byte, error) {
 	var req rpcModelRouteRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return nil, fmt.Errorf("decode model.route request: %w", err)
 	}
 
-	if req.RequestedModel != "gpt-5.5" {
+	if !modelInAllowlist(req.RequestedModel) {
 		return okEnvelope(pluginapi.ModelRouteResponse{Handled: false})
 	}
 	switch req.SourceFormat {
@@ -289,6 +304,7 @@ func runFold(baseBody map[string]any, origInput []any, req rpcExecutorRequest, s
 		}
 
 		fs.endRound(terminal, usage)
+		fs.debugDecision()
 
 		if fs.shouldContinue() {
 			fs.debugf("continuing after round=%d reasoning_tokens=%s", fs.roundNo, optionalIntString(reasoningTokens(fs.usage)))
@@ -682,6 +698,65 @@ func (fs *foldState) endRound(terminal map[string]any, usage map[string]any) {
 	fs.debugf("round=%d completed reasoning_tokens=%s tier=%s", fs.roundNo, optionalIntString(rt), optionalIntString(n))
 }
 
+func (fs *foldState) minReasoningThreshold() int {
+	if fs.config.MinReasoningTokens == nil {
+		return 0
+	}
+	threshold, ok := fs.config.MinReasoningTokens[fs.req.Model]
+	if !ok {
+		return 0
+	}
+	return threshold
+}
+
+func (fs *foldState) totalReasoningTokens() *int {
+	if fs.summedUsage == nil {
+		return nil
+	}
+	details, _ := fs.summedUsage["output_tokens_details"].(map[string]any)
+	if details == nil {
+		return nil
+	}
+	raw, ok := details["reasoning_tokens"]
+	if !ok || raw == nil {
+		return nil
+	}
+	f, ok := raw.(float64)
+	if !ok {
+		return nil
+	}
+	n := int(f)
+	return &n
+}
+
+func (fs *foldState) continueReason() string {
+	rt := reasoningTokens(fs.usage)
+	n := tierN(rt)
+	if inContinueWindow(n, fs.config.MaxTierN) {
+		return continueReasonTruncation
+	}
+
+	threshold := fs.minReasoningThreshold()
+	if threshold <= 0 {
+		return ""
+	}
+	totalReasoning := fs.totalReasoningTokens()
+	if totalReasoning == nil {
+		return ""
+	}
+	if *totalReasoning < threshold {
+		return continueReasonLowReasoningTokens
+	}
+	return ""
+}
+
+func (fs *foldState) markLastRoundContinueReason(reason string) {
+	if reason == "" || len(fs.roundsInfo) == 0 {
+		return
+	}
+	fs.roundsInfo[len(fs.roundsInfo)-1]["continue_reason"] = reason
+}
+
 func (fs *foldState) shouldContinue() bool {
 	if fs.terminal == nil {
 		return false
@@ -690,15 +765,38 @@ func (fs *foldState) shouldContinue() bool {
 	if etype != "response.completed" {
 		return false
 	}
-	rt := reasoningTokens(fs.usage)
-	n := tierN(rt)
-	if !inContinueWindow(n, fs.config.MaxTierN) {
+	reason := fs.continueReason()
+	if reason == "" {
 		return false
 	}
 	if !fs.hasEncryptedContent() {
 		return false
 	}
-	return fs.roundNo <= fs.config.MaxContinue
+	if fs.roundNo > fs.config.MaxContinue {
+		return false
+	}
+	fs.markLastRoundContinueReason(reason)
+	return true
+}
+
+func (fs *foldState) debugDecision() {
+	if !fs.config.DebugLog {
+		return
+	}
+	reason := fs.continueReason()
+	rt := reasoningTokens(fs.usage)
+	total := fs.totalReasoningTokens()
+	fs.debugf(
+		"decision model=%s round=%d reasoning_tokens=%s total_reasoning_tokens=%s min_reasoning_tokens=%d trigger=%s has_encrypted_content=%t max_continue=%d",
+		fs.req.Model,
+		fs.roundNo,
+		optionalIntString(rt),
+		optionalIntString(total),
+		fs.minReasoningThreshold(),
+		reason,
+		fs.hasEncryptedContent(),
+		fs.config.MaxContinue,
+	)
 }
 
 func (fs *foldState) stoppedReason() string {
@@ -708,16 +806,26 @@ func (fs *foldState) stoppedReason() string {
 	}
 	rt := reasoningTokens(fs.usage)
 	n := tierN(rt)
+	trigger := fs.continueReason()
+	if !fs.hasEncryptedContent() {
+		if trigger != "" {
+			return "no_encrypted_content"
+		}
+		return ""
+	}
+	if fs.roundNo > fs.config.MaxContinue {
+		if trigger != "" {
+			return "max_continue"
+		}
+		return ""
+	}
 	if n == nil {
 		return ""
 	}
-	if !fs.hasEncryptedContent() {
-		return "no_encrypted_content"
+	if !inContinueWindow(n, fs.config.MaxTierN) {
+		return "tier_out_of_window"
 	}
-	if fs.roundNo > fs.config.MaxContinue {
-		return "max_continue"
-	}
-	return "tier_out_of_window"
+	return ""
 }
 
 func (fs *foldState) hasEncryptedContent() bool {

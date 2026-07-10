@@ -191,6 +191,11 @@ func pluginRegistration() registration {
 			GitHubRepository: "https://github.com/uf-hy/cpa-plugin-codexcomp",
 			ConfigFields: []pluginapi.ConfigField{
 				{
+					Name:        "models",
+					Type:        pluginapi.ConfigFieldTypeArray,
+					Description: "List of exact model identifiers to intercept. Defaults to gpt-5.5 and gpt-5.6-luna.",
+				},
+				{
 					Name:        "marker_text",
 					Type:        pluginapi.ConfigFieldTypeString,
 					Description: "Continuation nudge inserted as a phase: commentary assistant message after a detected reasoning truncation. Defaults to Continue thinking...",
@@ -209,6 +214,11 @@ func pluginRegistration() registration {
 					Name:        "debug_log",
 					Type:        pluginapi.ConfigFieldTypeBoolean,
 					Description: "Enable debug logs through CPA host logging. Defaults to false.",
+				},
+				{
+					Name:        "min_reasoning_tokens",
+					Type:        pluginapi.ConfigFieldTypeObject,
+					Description: "Experimental and not recommended: observed effectiveness is poor because continuation rounds often add few or no reasoning tokens. Optional per-model minimum reasoning token thresholds; disabled by default. When configured, the plugin attempts continuation for every intercepted request whose cumulative reasoning is below the threshold, subject to encrypted state and continuation limits. Keys are exact model identifiers and values are non-negative integers. YAML example: gpt-5.6-luna: 1200.",
 				},
 			},
 		},

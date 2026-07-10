@@ -4,7 +4,7 @@
     {
       "id": "codexcomp",
       "name": "CodexComp",
-      "description": "Detects and repairs gpt-5.5 reasoning truncation in streaming requests, continuing reasoning automatically to reduce occasional model degradation",
+      "description": "Detects and repairs reasoning truncation for configurable model IDs (defaults: gpt-5.5 and gpt-5.6-luna), continuing reasoning automatically to reduce occasional model degradation",
       "author": "uf-hy",
       "repository": "https://github.com/uf-hy/cpa-plugin-codexcomp",
       "homepage": "https://github.com/uf-hy/cpa-plugin-codexcomp",

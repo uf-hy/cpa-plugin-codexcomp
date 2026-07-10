@@ -20,10 +20,12 @@ const (
 // foldConfig mirrors cpa-model-fallback-router's pluginConfig pattern:
 // yaml-tagged struct, decoded by yaml.Unmarshal, normalized and validated.
 type foldConfig struct {
-	MarkerText  string `yaml:"marker_text"`
-	MaxTierN    int    `yaml:"max_tier_n"`
-	MaxContinue int    `yaml:"max_continue"`
-	DebugLog    bool   `yaml:"debug_log"`
+	MarkerText         string         `yaml:"marker_text"`
+	MaxTierN           int            `yaml:"max_tier_n"`
+	MaxContinue        int            `yaml:"max_continue"`
+	DebugLog           bool           `yaml:"debug_log"`
+	Models             []string       `yaml:"models"`
+	MinReasoningTokens map[string]int `yaml:"min_reasoning_tokens"`
 }
 
 var globalFoldConfig atomic.Value
@@ -59,7 +61,12 @@ func defaultFoldConfig() foldConfig {
 		MarkerText:  defaultMarkerText,
 		MaxTierN:    defaultMaxTierN,
 		MaxContinue: defaultMaxContinue,
+		Models:      defaultModels(),
 	}
+}
+
+func defaultModels() []string {
+	return []string{"gpt-5.5", "gpt-5.6-luna"}
 }
 
 func currentFoldConfig() foldConfig {
@@ -97,6 +104,34 @@ func normalizeFoldConfig(cfg *foldConfig) {
 	if cfg.MarkerText == "" {
 		cfg.MarkerText = defaultMarkerText
 	}
+	// Normalize models: trim entries, drop empty entries, fallback to default if empty
+	normalized := make([]string, 0, len(cfg.Models))
+	for _, m := range cfg.Models {
+		trimmed := strings.TrimSpace(m)
+		if trimmed != "" {
+			normalized = append(normalized, trimmed)
+		}
+	}
+	if len(normalized) == 0 {
+		cfg.Models = defaultModels()
+	} else {
+		cfg.Models = normalized
+	}
+	// Normalize MinReasoningTokens: trim model keys, drop empty keys
+	if cfg.MinReasoningTokens != nil {
+		normalizedMap := make(map[string]int, len(cfg.MinReasoningTokens))
+		for model, threshold := range cfg.MinReasoningTokens {
+			trimmedModel := strings.TrimSpace(model)
+			if trimmedModel != "" {
+				normalizedMap[trimmedModel] = threshold
+			}
+		}
+		if len(normalizedMap) == 0 {
+			cfg.MinReasoningTokens = nil
+		} else {
+			cfg.MinReasoningTokens = normalizedMap
+		}
+	}
 }
 
 func validateFoldConfig(cfg foldConfig) error {
@@ -105,6 +140,11 @@ func validateFoldConfig(cfg foldConfig) error {
 	}
 	if cfg.MaxContinue < 0 {
 		return fmt.Errorf("max_continue must be a non-negative integer")
+	}
+	for model, threshold := range cfg.MinReasoningTokens {
+		if threshold < 0 {
+			return fmt.Errorf("min_reasoning_tokens[%s] must be non-negative, got %d", model, threshold)
+		}
 	}
 	return nil
 }

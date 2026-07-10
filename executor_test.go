@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -518,7 +519,7 @@ func TestApplyLifecycleConfig(t *testing.T) {
 	previous := currentFoldConfig()
 	defer setFoldConfig(previous)
 
-	payload, err := json.Marshal(lifecycleRequest{ConfigYAML: []byte("marker_text: Custom marker\nmax_continue: 5\nmax_tier_n: 8\ndebug_log: true")})
+	payload, err := json.Marshal(lifecycleRequest{ConfigYAML: []byte("marker_text: Custom marker\nmax_continue: 5\nmax_tier_n: 8\ndebug_log: true\nmodels:\n  - ' gpt-5.6-luna '\n  - gpt-5.6-terra")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -538,6 +539,9 @@ func TestApplyLifecycleConfig(t *testing.T) {
 	if !cfg.DebugLog {
 		t.Error("DebugLog should be true")
 	}
+	if len(cfg.Models) != 2 || cfg.Models[0] != "gpt-5.6-luna" || cfg.Models[1] != "gpt-5.6-terra" {
+		t.Errorf("Models = %v", cfg.Models)
+	}
 }
 
 func TestApplyLifecycleConfigEmptyRawInstallsDefaults(t *testing.T) {
@@ -549,18 +553,25 @@ func TestApplyLifecycleConfigEmptyRawInstallsDefaults(t *testing.T) {
 		t.Fatalf("empty raw should not error: %v", err)
 	}
 	cfg := currentFoldConfig()
-	if cfg != defaultFoldConfig() {
+	defaults := defaultFoldConfig()
+	if cfg.MarkerText != defaults.MarkerText || cfg.MaxContinue != defaults.MaxContinue || cfg.MaxTierN != defaults.MaxTierN || cfg.DebugLog != defaults.DebugLog {
 		t.Errorf("empty raw should install defaults, got %+v", cfg)
+	}
+	if !reflect.DeepEqual(cfg.Models, defaults.Models) {
+		t.Errorf("empty raw should install defaults, got Models=%v", cfg.Models)
 	}
 }
 
 func TestDecodeFoldConfigFromJSON(t *testing.T) {
-	cfg, err := decodeFoldConfig([]byte(`{"marker_text":"JSON marker","max_continue":2,"max_tier_n":0,"debug_log":true}`))
+	cfg, err := decodeFoldConfig([]byte(`{"marker_text":"JSON marker","max_continue":2,"max_tier_n":0,"debug_log":true,"models":["gpt-5.6-sol"]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.MarkerText != "JSON marker" || cfg.MaxContinue != 2 || cfg.MaxTierN != 0 || !cfg.DebugLog {
 		t.Fatalf("unexpected config: %+v", cfg)
+	}
+	if len(cfg.Models) != 1 || cfg.Models[0] != "gpt-5.6-sol" {
+		t.Fatalf("unexpected models: %v", cfg.Models)
 	}
 }
 
@@ -573,6 +584,166 @@ func TestDecodeFoldConfigRejectsInvalidValues(t *testing.T) {
 		if _, err := decodeFoldConfig(raw); err == nil {
 			t.Fatalf("expected error for %q", string(raw))
 		}
+	}
+}
+
+func TestDecodeFoldConfigModelsDefault(t *testing.T) {
+	cfg, err := decodeFoldConfig([]byte(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg.Models, []string{"gpt-5.5", "gpt-5.6-luna"}) {
+		t.Errorf("default models should be [gpt-5.5 gpt-5.6-luna], got %v", cfg.Models)
+	}
+	if cfg.MinReasoningTokens != nil {
+		t.Errorf("min_reasoning_tokens should be disabled by default, got %v", cfg.MinReasoningTokens)
+	}
+}
+
+func TestPluginRegistrationExperimentalThresholdDescription(t *testing.T) {
+	reg := pluginRegistration()
+	var field *pluginapi.ConfigField
+	for i := range reg.Metadata.ConfigFields {
+		if reg.Metadata.ConfigFields[i].Name == "min_reasoning_tokens" {
+			field = &reg.Metadata.ConfigFields[i]
+			break
+		}
+	}
+	if field == nil {
+		t.Fatal("min_reasoning_tokens config field not registered")
+	}
+	if field.Type != pluginapi.ConfigFieldTypeObject {
+		t.Errorf("field type = %q, want object", field.Type)
+	}
+	if !strings.Contains(field.Description, "not recommended") || !strings.Contains(field.Description, "disabled by default") {
+		t.Errorf("description must warn that the feature is not recommended and disabled by default: %q", field.Description)
+	}
+	if strings.Contains(field.Description, `"`) || strings.Contains(field.Description, "&#34;") {
+		t.Errorf("description must avoid quote entities in management UI: %q", field.Description)
+	}
+}
+
+func TestDecodeFoldConfigModelsConfigured(t *testing.T) {
+	cfg, err := decodeFoldConfig([]byte("models:\n  - gpt-5.6-luna\n  - gpt-5.6-terra\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := []string{"gpt-5.6-luna", "gpt-5.6-terra"}
+	if len(cfg.Models) != len(expected) {
+		t.Errorf("expected %v, got %v", expected, cfg.Models)
+	}
+	for i, m := range expected {
+		if cfg.Models[i] != m {
+			t.Errorf("models[%d] = %q, want %q", i, cfg.Models[i], m)
+		}
+	}
+}
+
+func TestDecodeFoldConfigModelsWhitespace(t *testing.T) {
+	cfg, err := decodeFoldConfig([]byte("models:\n  - '  gpt-5.5  '\n  - '  gpt-5.6-luna  '\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Models[0] != "gpt-5.5" {
+		t.Errorf("whitespace should be trimmed, got %q", cfg.Models[0])
+	}
+	if cfg.Models[1] != "gpt-5.6-luna" {
+		t.Errorf("whitespace should be trimmed, got %q", cfg.Models[1])
+	}
+}
+
+func TestDecodeFoldConfigModelsEmptyFallback(t *testing.T) {
+	cfg, err := decodeFoldConfig([]byte("models: []\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg.Models, []string{"gpt-5.5", "gpt-5.6-luna"}) {
+		t.Errorf("empty models should fallback to default, got %v", cfg.Models)
+	}
+}
+
+func TestDecodeFoldConfigModelsEmptyStringFallback(t *testing.T) {
+	cfg, err := decodeFoldConfig([]byte("models:\n  - ''\n  - '   '\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg.Models, []string{"gpt-5.5", "gpt-5.6-luna"}) {
+		t.Errorf("all-empty models should fallback to default, got %v", cfg.Models)
+	}
+}
+
+func TestModelInAllowlistDefault(t *testing.T) {
+	previous := currentFoldConfig()
+	defer setFoldConfig(previous)
+	setFoldConfig(defaultFoldConfig())
+
+	if !modelInAllowlist("gpt-5.5") {
+		t.Error("gpt-5.5 should be in default allowlist")
+	}
+	if !modelInAllowlist("gpt-5.6-luna") {
+		t.Error("gpt-5.6-luna should be in default allowlist")
+	}
+	if modelInAllowlist("gpt-4o") {
+		t.Error("gpt-4o should not be in default allowlist")
+	}
+}
+
+func TestModelInAllowlistConfigured(t *testing.T) {
+	previous := currentFoldConfig()
+	defer setFoldConfig(previous)
+	setFoldConfig(foldConfig{Models: []string{"gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"}})
+
+	if !modelInAllowlist("gpt-5.6-luna") {
+		t.Error("gpt-5.6-luna should be in allowlist")
+	}
+	if !modelInAllowlist("gpt-5.6-terra") {
+		t.Error("gpt-5.6-terra should be in allowlist")
+	}
+	if !modelInAllowlist("gpt-5.6-sol") {
+		t.Error("gpt-5.6-sol should be in allowlist")
+	}
+	if modelInAllowlist("gpt-5.5") {
+		t.Error("gpt-5.5 should not be in custom allowlist")
+	}
+}
+
+func TestRouteModelWithCustomAllowlist(t *testing.T) {
+	previous := currentFoldConfig()
+	defer setFoldConfig(previous)
+	setFoldConfig(foldConfig{Models: []string{"gpt-5.6-luna", "gpt-5.6-terra"}})
+
+	body := `{"model":"gpt-5.6-luna","stream":true,"input":[{"type":"message","role":"user"}]}`
+	req := rpcModelRouteRequest{
+		ModelRouteRequest: pluginapi.ModelRouteRequest{
+			RequestedModel: "gpt-5.6-luna", SourceFormat: "openai-response",
+			Stream: true, Body: []byte(body),
+		},
+	}
+	raw, _ := json.Marshal(req)
+	result, _ := routeModel(raw)
+	var resp struct {
+		Data pluginapi.ModelRouteResponse `json:"result"`
+	}
+	json.Unmarshal(result, &resp)
+	if !resp.Data.Handled {
+		t.Error("gpt-5.6-luna should be accepted in custom allowlist")
+	}
+
+	// Test rejected model
+	req2 := rpcModelRouteRequest{
+		ModelRouteRequest: pluginapi.ModelRouteRequest{
+			RequestedModel: "gpt-5.5", SourceFormat: "openai-response",
+			Stream: true, Body: []byte(body),
+		},
+	}
+	raw2, _ := json.Marshal(req2)
+	result2, _ := routeModel(raw2)
+	var resp2 struct {
+		Data pluginapi.ModelRouteResponse `json:"result"`
+	}
+	json.Unmarshal(result2, &resp2)
+	if resp2.Data.Handled {
+		t.Error("gpt-5.5 should be rejected in custom allowlist")
 	}
 }
 
@@ -1490,3 +1661,261 @@ func TestExtractSessionIDMetadataFallback(t *testing.T) {
 }
 
 func intPtr(v int) *int { return &v }
+
+func TestDecodeFoldConfigMinReasoningTokens(t *testing.T) {
+	cfg, err := decodeFoldConfig([]byte("min_reasoning_tokens:\n  gpt-5.6-luna: 1200\n  gpt-5.6-terra: 800\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MinReasoningTokens == nil {
+		t.Fatal("MinReasoningTokens should not be nil")
+	}
+	if cfg.MinReasoningTokens["gpt-5.6-luna"] != 1200 {
+		t.Errorf("gpt-5.6-luna threshold = %d, want 1200", cfg.MinReasoningTokens["gpt-5.6-luna"])
+	}
+	if cfg.MinReasoningTokens["gpt-5.6-terra"] != 800 {
+		t.Errorf("gpt-5.6-terra threshold = %d, want 800", cfg.MinReasoningTokens["gpt-5.6-terra"])
+	}
+}
+
+func TestDecodeFoldConfigMinReasoningTokensNormalization(t *testing.T) {
+	cfg, err := decodeFoldConfig([]byte("min_reasoning_tokens:\n  '  gpt-5.6-luna  ': 1200\n  '': 500\n  '   ': 600\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MinReasoningTokens == nil {
+		t.Fatal("MinReasoningTokens should not be nil")
+	}
+	if _, hasEmptyKey := cfg.MinReasoningTokens[""]; hasEmptyKey {
+		t.Error("empty model keys should be dropped")
+	}
+	if cfg.MinReasoningTokens["gpt-5.6-luna"] != 1200 {
+		t.Errorf("model key should be trimmed, got %v", cfg.MinReasoningTokens)
+	}
+}
+
+func TestDecodeFoldConfigMinReasoningTokensNegative(t *testing.T) {
+	_, err := decodeFoldConfig([]byte("min_reasoning_tokens:\n  gpt-5.6-luna: -100\n"))
+	if err == nil {
+		t.Fatal("negative threshold should be rejected")
+	}
+}
+
+func TestDecodeFoldConfigMinReasoningTokensEmpty(t *testing.T) {
+	cfg, err := decodeFoldConfig([]byte("min_reasoning_tokens: {}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MinReasoningTokens != nil {
+		t.Error("empty map should be normalized to nil")
+	}
+}
+
+func TestMinReasoningThreshold(t *testing.T) {
+	fs := &foldState{
+		req: rpcExecutorRequest{ExecutorRequest: pluginapi.ExecutorRequest{Model: "gpt-5.6-luna"}},
+		config: foldConfig{
+			MinReasoningTokens: map[string]int{"gpt-5.6-luna": 1200, "gpt-5.6-terra": 800},
+		},
+	}
+	if fs.minReasoningThreshold() != 1200 {
+		t.Errorf("threshold for gpt-5.6-luna = %d, want 1200", fs.minReasoningThreshold())
+	}
+
+	fs.req.Model = "gpt-5.5"
+	if fs.minReasoningThreshold() != 0 {
+		t.Errorf("threshold for unconfigured model = %d, want 0", fs.minReasoningThreshold())
+	}
+
+	fs.config.MinReasoningTokens = nil
+	if fs.minReasoningThreshold() != 0 {
+		t.Errorf("threshold with nil config = %d, want 0", fs.minReasoningThreshold())
+	}
+}
+
+func TestShouldContinueLowReasoningTokens(t *testing.T) {
+	fs := &foldState{
+		terminal:       map[string]any{"type": "response.completed"},
+		usage:          map[string]any{"output_tokens_details": map[string]any{"reasoning_tokens": float64(100)}},
+		roundReasoning: []map[string]any{{"encrypted_content": "abc"}},
+		summedUsage:    map[string]any{"output_tokens_details": map[string]any{"reasoning_tokens": float64(100)}},
+		roundsInfo:     []map[string]any{{"round": 1}},
+		req:            rpcExecutorRequest{ExecutorRequest: pluginapi.ExecutorRequest{Model: "gpt-5.6-luna"}},
+		config: foldConfig{
+			MarkerText:         defaultMarkerText,
+			MaxTierN:           defaultMaxTierN,
+			MaxContinue:        defaultMaxContinue,
+			MinReasoningTokens: map[string]int{"gpt-5.6-luna": 1200},
+		},
+	}
+	fs.roundNo = 1
+
+	if !fs.shouldContinue() {
+		t.Error("should continue when total reasoning tokens < threshold")
+	}
+	if fs.roundsInfo[0]["continue_reason"] != continueReasonLowReasoningTokens {
+		t.Errorf("continue_reason = %v, want %s", fs.roundsInfo[0]["continue_reason"], continueReasonLowReasoningTokens)
+	}
+}
+
+func TestShouldContinueLowReasoningTokensNotTriggered(t *testing.T) {
+	fs := &foldState{
+		terminal:       map[string]any{"type": "response.completed"},
+		usage:          map[string]any{"output_tokens_details": map[string]any{"reasoning_tokens": float64(100)}},
+		roundReasoning: []map[string]any{{"encrypted_content": "abc"}},
+		summedUsage:    map[string]any{"output_tokens_details": map[string]any{"reasoning_tokens": float64(1500)}},
+		req:            rpcExecutorRequest{ExecutorRequest: pluginapi.ExecutorRequest{Model: "gpt-5.6-luna"}},
+		config: foldConfig{
+			MarkerText:         defaultMarkerText,
+			MaxTierN:           defaultMaxTierN,
+			MaxContinue:        defaultMaxContinue,
+			MinReasoningTokens: map[string]int{"gpt-5.6-luna": 1200},
+		},
+	}
+	fs.roundNo = 1
+
+	if fs.shouldContinue() {
+		t.Error("should not continue when total reasoning tokens >= threshold")
+	}
+}
+
+func TestShouldContinueTruncationPriority(t *testing.T) {
+	fs := &foldState{
+		terminal:       map[string]any{"type": "response.completed"},
+		usage:          map[string]any{"output_tokens_details": map[string]any{"reasoning_tokens": float64(516)}},
+		roundReasoning: []map[string]any{{"encrypted_content": "abc"}},
+		summedUsage:    map[string]any{"output_tokens_details": map[string]any{"reasoning_tokens": float64(100)}},
+		roundsInfo:     []map[string]any{{"round": 1}},
+		req:            rpcExecutorRequest{ExecutorRequest: pluginapi.ExecutorRequest{Model: "gpt-5.6-luna"}},
+		config: foldConfig{
+			MarkerText:         defaultMarkerText,
+			MaxTierN:           defaultMaxTierN,
+			MaxContinue:        defaultMaxContinue,
+			MinReasoningTokens: map[string]int{"gpt-5.6-luna": 1200},
+		},
+	}
+	fs.roundNo = 1
+
+	if !fs.shouldContinue() {
+		t.Error("truncation trigger should take priority")
+	}
+	if fs.roundsInfo[0]["continue_reason"] != continueReasonTruncation {
+		t.Errorf("continue_reason = %v, want %s", fs.roundsInfo[0]["continue_reason"], continueReasonTruncation)
+	}
+}
+
+func TestShouldContinueLowReasoningTokensNoEnc(t *testing.T) {
+	fs := &foldState{
+		terminal:       map[string]any{"type": "response.completed"},
+		usage:          map[string]any{"output_tokens_details": map[string]any{"reasoning_tokens": float64(100)}},
+		roundReasoning: []map[string]any{{"type": "reasoning"}},
+		summedUsage:    map[string]any{"output_tokens_details": map[string]any{"reasoning_tokens": float64(100)}},
+		req:            rpcExecutorRequest{ExecutorRequest: pluginapi.ExecutorRequest{Model: "gpt-5.6-luna"}},
+		config: foldConfig{
+			MinReasoningTokens: map[string]int{"gpt-5.6-luna": 1200},
+		},
+	}
+	fs.roundNo = 1
+
+	if fs.shouldContinue() {
+		t.Error("low reasoning tokens trigger should still require encrypted_content")
+	}
+	if reason := fs.stoppedReason(); reason != "no_encrypted_content" {
+		t.Errorf("stoppedReason = %s, want no_encrypted_content", reason)
+	}
+}
+
+func TestShouldContinueLowReasoningTokensMaxContinue(t *testing.T) {
+	fs := &foldState{
+		terminal:       map[string]any{"type": "response.completed"},
+		usage:          map[string]any{"output_tokens_details": map[string]any{"reasoning_tokens": float64(100)}},
+		roundReasoning: []map[string]any{{"encrypted_content": "abc"}},
+		summedUsage:    map[string]any{"output_tokens_details": map[string]any{"reasoning_tokens": float64(100)}},
+		req:            rpcExecutorRequest{ExecutorRequest: pluginapi.ExecutorRequest{Model: "gpt-5.6-luna"}},
+		config: foldConfig{
+			MarkerText:         defaultMarkerText,
+			MaxTierN:           defaultMaxTierN,
+			MaxContinue:        defaultMaxContinue,
+			MinReasoningTokens: map[string]int{"gpt-5.6-luna": 1200},
+		},
+	}
+	fs.roundNo = defaultMaxContinue + 1
+
+	if fs.shouldContinue() {
+		t.Error("low reasoning tokens trigger should still respect max_continue")
+	}
+	if reason := fs.stoppedReason(); reason != "max_continue" {
+		t.Errorf("stoppedReason = %s, want max_continue", reason)
+	}
+}
+
+func TestStoppedReasonLowReasoningTokensThresholdMetIsNaturalStop(t *testing.T) {
+	fs := &foldState{
+		terminal:       map[string]any{"type": "response.completed"},
+		usage:          map[string]any{"output_tokens_details": map[string]any{"reasoning_tokens": float64(984)}},
+		roundReasoning: []map[string]any{{"encrypted_content": "abc"}},
+		summedUsage:    map[string]any{"output_tokens_details": map[string]any{"reasoning_tokens": float64(1500)}},
+		req:            rpcExecutorRequest{ExecutorRequest: pluginapi.ExecutorRequest{Model: "gpt-5.6-luna"}},
+		config: foldConfig{
+			MarkerText:         defaultMarkerText,
+			MaxTierN:           defaultMaxTierN,
+			MaxContinue:        defaultMaxContinue,
+			MinReasoningTokens: map[string]int{"gpt-5.6-luna": 1200},
+		},
+	}
+	fs.roundNo = 1
+
+	reason := fs.stoppedReason()
+	if reason != "" {
+		t.Errorf("stoppedReason = %s, want empty natural stop", reason)
+	}
+}
+
+func TestContinueReasonsRecordedInRoundsInfo(t *testing.T) {
+	fs := &foldState{
+		terminal:       map[string]any{"type": "response.completed"},
+		usage:          map[string]any{"output_tokens_details": map[string]any{"reasoning_tokens": float64(100)}},
+		roundReasoning: []map[string]any{{"encrypted_content": "abc"}},
+		summedUsage:    map[string]any{},
+		req:            rpcExecutorRequest{ExecutorRequest: pluginapi.ExecutorRequest{Model: "gpt-5.6-luna"}},
+		config: foldConfig{
+			MarkerText:         defaultMarkerText,
+			MaxTierN:           defaultMaxTierN,
+			MaxContinue:        3,
+			MinReasoningTokens: map[string]int{"gpt-5.6-luna": 300},
+		},
+	}
+
+	// Round 1: low_reasoning_tokens trigger
+	fs.roundNo = 1
+	fs.summedUsage = map[string]any{"output_tokens_details": map[string]any{"reasoning_tokens": float64(100)}}
+	fs.roundsInfo = append(fs.roundsInfo, map[string]any{"round": 1})
+	if !fs.shouldContinue() {
+		t.Error("round 1 should continue")
+	}
+
+	// Round 2: still below threshold
+	fs.roundNo = 2
+	fs.summedUsage = map[string]any{"output_tokens_details": map[string]any{"reasoning_tokens": float64(200)}}
+	fs.roundsInfo = append(fs.roundsInfo, map[string]any{"round": 2})
+	if !fs.shouldContinue() {
+		t.Error("round 2 should continue")
+	}
+
+	// Round 3: threshold met
+	fs.roundNo = 3
+	fs.summedUsage = map[string]any{"output_tokens_details": map[string]any{"reasoning_tokens": float64(350)}}
+	fs.roundsInfo = append(fs.roundsInfo, map[string]any{"round": 3})
+	if fs.shouldContinue() {
+		t.Error("round 3 should not continue (threshold met)")
+	}
+
+	for i := 0; i < 2; i++ {
+		if fs.roundsInfo[i]["continue_reason"] != continueReasonLowReasoningTokens {
+			t.Errorf("roundsInfo[%d].continue_reason = %v, want %s", i, fs.roundsInfo[i]["continue_reason"], continueReasonLowReasoningTokens)
+		}
+	}
+	if _, ok := fs.roundsInfo[2]["continue_reason"]; ok {
+		t.Errorf("final natural-stop round should not have continue_reason: %v", fs.roundsInfo[2])
+	}
+}
