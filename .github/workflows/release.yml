@@ -1,15 +1,19 @@
 name: Release
 
 on:
+  pull_request:
+    branches:
+      - master
   push:
     tags:
       - 'v*'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
+    if: github.event_name == 'push'
     strategy:
       matrix:
         include:
@@ -67,10 +71,26 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
 
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26'
+
+      - name: Resolve version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_EVENT_NAME -eq 'pull_request') {
+            $event = Get-Content -Raw -LiteralPath $env:GITHUB_EVENT_PATH | ConvertFrom-Json
+            $shortSha = $event.pull_request.head.sha.Substring(0, 7)
+            $version = "pr-$($event.number)-$shortSha"
+          } else {
+            $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          }
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Building version $version"
 
       - uses: msys2/setup-msys2@v2
         with:
@@ -79,7 +99,25 @@ jobs:
           update: true
           install: >-
             mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-binutils
             zip
+
+      - name: Verify UCRT64 toolchain
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          go_path="$(command -v go)"
+          gcc_path="$(command -v gcc)"
+          zip_path="$(command -v zip)"
+          objdump_path="$(command -v objdump)"
+          printf 'go=%s\ngcc=%s\nzip=%s\nobjdump=%s\n' "$go_path" "$gcc_path" "$zip_path" "$objdump_path"
+          case "$gcc_path" in
+            /ucrt64/bin/gcc|/ucrt64/bin/gcc.exe) ;;
+            *) echo "Expected UCRT64 gcc, got $gcc_path" >&2; exit 1 ;;
+          esac
+          test "$(gcc -dumpmachine)" = "x86_64-w64-mingw32"
+          go version
+          gcc --version
 
       - name: Clone CLIProxyAPI SDK (latest release)
         shell: pwsh
@@ -97,7 +135,7 @@ jobs:
           CGO_ENABLED: 1
           CC: gcc
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          set -euo pipefail
           go mod tidy
           go build -trimpath -ldflags="-s -w -X main.pluginVersion=${VERSION}" -buildmode=c-shared -o codexcomp.dll
 
@@ -110,11 +148,78 @@ jobs:
           CC: gcc
         run: go test ./...
 
+      - name: Validate DLL exports and dependencies
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          pe_info="$(objdump -p codexcomp.dll)"
+          printf '%s\n' "$pe_info"
+          if ! grep -Fq 'cliproxy_plugin_init' <<<"$pe_info"; then
+            echo 'codexcomp.dll does not export cliproxy_plugin_init' >&2
+            exit 1
+          fi
+          imports="$(sed -n 's/^[[:space:]]*DLL Name: //p' <<<"$pe_info")"
+          printf 'Imported DLLs:\n%s\n' "$imports"
+          if grep -Eqi '^(msys-[^ ]*|libgcc_[^ ]*|libstdc\+\+-6|libwinpthread-1)\.dll$' <<<"$imports"; then
+            echo 'codexcomp.dll depends on an unpackaged MSYS2/MinGW runtime DLL' >&2
+            exit 1
+          fi
+
       - name: Package zip
         shell: msys2 {0}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          set -euo pipefail
           zip "codexcomp_${VERSION}_windows_amd64.zip" codexcomp.dll
+
+      - name: Smoke test packaged DLL
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Get-ChildItem -LiteralPath $env:GITHUB_WORKSPACE -Filter 'codexcomp_*_windows_amd64.zip' |
+            Select-Object -First 1
+          if (-not $zip) { throw 'Windows release zip was not created' }
+
+          $extractDir = Join-Path $env:RUNNER_TEMP 'codexcomp-dll-smoke'
+          Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction SilentlyContinue
+          Expand-Archive -LiteralPath $zip.FullName -DestinationPath $extractDir
+          $dllPath = (Resolve-Path -LiteralPath (Join-Path $extractDir 'codexcomp.dll')).Path
+
+          $env:PATH = (($env:PATH -split ';' | Where-Object {
+            $_ -and $_ -notmatch '(?i)(msys64|ucrt64|mingw)'
+          }) -join ';')
+
+          Add-Type -TypeDefinition @'
+          using System;
+          using System.Runtime.InteropServices;
+
+          public static class NativeLibrarySmokeTest {
+              [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+              public static extern IntPtr LoadLibraryW(string path);
+
+              [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
+              public static extern IntPtr GetProcAddress(IntPtr module, string name);
+
+              [DllImport("kernel32.dll")]
+              [return: MarshalAs(UnmanagedType.Bool)]
+              public static extern bool FreeLibrary(IntPtr module);
+          }
+          '@
+
+          $module = [NativeLibrarySmokeTest]::LoadLibraryW($dllPath)
+          if ($module -eq [IntPtr]::Zero) {
+            $code = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            throw "LoadLibraryW failed for $dllPath with Win32 error $code"
+          }
+          try {
+            $entry = [NativeLibrarySmokeTest]::GetProcAddress($module, 'cliproxy_plugin_init')
+            if ($entry -eq [IntPtr]::Zero) {
+              $code = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+              throw "GetProcAddress failed for cliproxy_plugin_init with Win32 error $code"
+            }
+            Write-Host 'Packaged DLL loaded and cliproxy_plugin_init was found.'
+          } finally {
+            [void][NativeLibrarySmokeTest]::FreeLibrary($module)
+          }
 
       - uses: actions/upload-artifact@v4
         with:
@@ -123,6 +228,9 @@ jobs:
 
   release:
     needs: [build, build-windows]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
