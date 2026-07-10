@@ -62,18 +62,16 @@ CodexCont 是最初的续写机制。codexcomp 将其改进为传输无关的折
 
 ### 方式一：CPA WebUI 安装（推荐）
 
-在 CPA 的 WebUI 中添加本仓库为插件源：
+CodexComp 已收录进 [CLIProxyAPI 官方插件商店](https://github.com/router-for-me/CLIProxyAPI-Plugins-Store/pull/24)：
 
 1. 打开 **配置面板 → 可视化编辑 → 完整 → 高级与实验 → 插件**
 2. 确保插件系统为开启
-3. 在「第三方插件源」里点击「添加」，填入：
+3. 在插件商店页面搜索 CodexComp，点击安装
+4. 如果暂时看不到条目，刷新插件商店或升级 CPA；也可以把下面的地址添加为第三方插件源：
 
-```
+```text
 https://raw.githubusercontent.com/uf-hy/cpa-plugin-codexcomp/master/registry.json
 ```
-
-4. 在最下方点击对钩保存更改即可热重载
-5. 随后在插件商店页面找到 CodexComp（可用搜索功能），点击安装即可
 
 CPA 会自动下载对应系统和架构的动态库、校验 SHA256、热重载，通常无需再次重启。Enjoy it!
 
@@ -81,17 +79,26 @@ CPA 会自动下载对应系统和架构的动态库、校验 SHA256、热重载
 
 从 [Releases](https://github.com/uf-hy/cpa-plugin-codexcomp/releases/latest) 下载对应平台的 zip 包，解压后放到 `plugins/` 目录：
 
+| CPA 运行系统 | 架构 | 资产名 | 动态库 |
+|---|---|---|---|
+| Linux | amd64 / arm64 | `codexcomp_<version>_linux_<arch>.zip` | `codexcomp.so` |
+| macOS | amd64 / arm64 | `codexcomp_<version>_darwin_<arch>.zip` | `codexcomp.dylib` |
+| Windows | amd64 / arm64 | `codexcomp_<version>_windows_<arch>.zip` | `codexcomp.dll` |
+| FreeBSD | amd64 | `codexcomp_<version>_freebsd_amd64.zip` | `codexcomp.so` |
+
+> FreeBSD arm64 的 CPA 官方成品是 `no-plugin` 构建，不支持动态库插件，因此没有对应插件资产。
+
 ```bash
-# Linux：确认架构后下载对应 zip，解压到 plugins 目录
+# Linux、macOS 或 FreeBSD：确认系统和架构后下载对应 zip
 mkdir -p <CPA_DIR>/plugins
-unzip -o codexcomp_<version>_linux_<amd64|arm64>.zip -d <CPA_DIR>/plugins/
+unzip -o "codexcomp_<version>_<goos>_<arch>.zip" -d <CPA_DIR>/plugins/
 ```
 
-Windows 原生部署目前提供 amd64 成品，可在 PowerShell 中解压：
+Windows 原生部署提供 amd64 和 arm64 成品，可在 PowerShell 中解压：
 
 ```powershell
 New-Item -ItemType Directory -Force -Path '<CPA_DIR>\plugins' | Out-Null
-Expand-Archive -LiteralPath 'codexcomp_<version>_windows_amd64.zip' -DestinationPath '<CPA_DIR>\plugins' -Force
+Expand-Archive -LiteralPath 'codexcomp_<version>_windows_<arch>.zip' -DestinationPath '<CPA_DIR>\plugins' -Force
 ```
 
 在 `config.yaml` 中启用插件：
@@ -119,15 +126,18 @@ volumes:
 
 ### 从源码编译
 
-`go.mod` 中有 `replace` 指令指向相邻目录的 CLIProxyAPI，需要先 clone 依赖仓库：
+`go.mod` 中有 `replace` 指令指向相邻目录的 CLIProxyAPI，需要先 clone 依赖仓库。完整的目标平台工具链与验证步骤以 [Release workflow](.github/workflows/release.yml) 为准：
 
 ```bash
 git clone https://github.com/router-for-me/CLIProxyAPI.git ../CLIProxyAPI
-# Linux
+# Linux 或 FreeBSD
 go build -buildmode=c-shared -o codexcomp.so .
+
+# macOS
+go build -buildmode=c-shared -o codexcomp.dylib .
 ```
 
-Windows 原生编译需要启用 CGO 并安装 GCC：
+Windows 原生编译需要启用 CGO 并安装与目标架构匹配的 C 工具链：amd64 使用 MSYS2 UCRT64/GCC，arm64 使用 MSYS2 CLANGARM64/Clang。
 
 ```powershell
 git clone 'https://github.com/router-for-me/CLIProxyAPI.git' '..\CLIProxyAPI'

@@ -6,24 +6,32 @@
 
 插件动态库必须匹配 **CPA 容器或进程的运行系统与架构**，不是宿主机架构。Windows 上运行 Linux 容器时仍应下载 Linux `.so`；只有原生 Windows CPA 进程才使用 `.dll`。
 
-### Linux 或 Docker
+支持的发布目标：
 
-先确认 CPA 实际跑在什么架构上：
+| CPA 运行系统 | 架构 | 动态库 |
+|---|---|---|
+| Linux | amd64 / arm64 | `.so` |
+| macOS | amd64 / arm64 | `.dylib` |
+| Windows | amd64 / arm64 | `.dll` |
+| FreeBSD | amd64 | `.so` |
 
-```bash
-# Docker 部署：查容器内架构（把 <service> 换成 docker-compose 里的服务名）
-docker compose exec <service> uname -m
+FreeBSD arm64 的 CPA 官方成品是 `no-plugin` 构建，不支持动态库插件。
 
-# 独立部署：直接查本机
-uname -m
-```
+### Linux、macOS、FreeBSD 或 Docker
 
-根据返回值选择对应的 zip：
+下面的脚本根据 CPA 运行环境的系统和架构选择资产。Docker 部署应在容器内运行检测命令；如果在宿主机下载，必须把脚本中的 `GOOS` 和 `GOARCH` 改成容器内的实际值。
 
 ```bash
 set -euo pipefail
 
-ARCH="<上面查到的输出>"
+case "$(uname -s)" in
+  Linux) GOOS="linux" ;;
+  Darwin) GOOS="darwin" ;;
+  FreeBSD) GOOS="freebsd" ;;
+  *) echo "不支持的操作系统：$(uname -s)" >&2; exit 1 ;;
+esac
+
+ARCH="$(uname -m)"
 case "$ARCH" in
   x86_64|amd64)
     GOARCH="amd64"
@@ -32,36 +40,50 @@ case "$ARCH" in
     GOARCH="arm64"
     ;;
   *)
-    echo "不支持的 CPU 架构：$ARCH。当前 release 只提供 Linux amd64/arm64 成品。" >&2
+    echo "不支持的 CPU 架构：$ARCH" >&2
     exit 1
     ;;
 esac
+
+if [ "$GOOS" = "freebsd" ] && [ "$GOARCH" != "amd64" ]; then
+  echo "FreeBSD arm64 的 CPA 官方成品不支持动态库插件" >&2
+  exit 1
+fi
 
 # 获取最新版本号（不带 v 前缀）
 VERSION=$(curl -s https://api.github.com/repos/uf-hy/cpa-plugin-codexcomp/releases/latest \
   | python3 -c "import sys,json;print(json.load(sys.stdin)['tag_name'].lstrip('v'))")
 
-ASSET="codexcomp_${VERSION}_linux_${GOARCH}.zip"
-wget -qO "/tmp/${ASSET}" \
-  "https://github.com/uf-hy/cpa-plugin-codexcomp/releases/latest/download/${ASSET}"
+ASSET="codexcomp_${VERSION}_${GOOS}_${GOARCH}.zip"
+curl -fL "https://github.com/uf-hy/cpa-plugin-codexcomp/releases/latest/download/${ASSET}" \
+  -o "/tmp/${ASSET}"
 
 # 校验完整性
-wget -qO /tmp/checksums.txt \
-  "https://github.com/uf-hy/cpa-plugin-codexcomp/releases/latest/download/checksums.txt"
-# 校验完整性：只校验目标文件那一行
-cd /tmp && grep "  ${ASSET}$" /tmp/checksums.txt | sha256sum -c - || { echo "checksum verification failed"; exit 1; }
+curl -fL 'https://github.com/uf-hy/cpa-plugin-codexcomp/releases/latest/download/checksums.txt' \
+  -o /tmp/checksums.txt
+EXPECTED=$(awk -v asset="$ASSET" '$2 == asset { print $1; exit }' /tmp/checksums.txt)
+test -n "$EXPECTED" || { echo "checksums.txt 中没有 $ASSET" >&2; exit 1; }
+if command -v sha256sum >/dev/null 2>&1; then
+  ACTUAL=$(sha256sum "/tmp/${ASSET}" | awk '{print $1}')
+elif command -v shasum >/dev/null 2>&1; then
+  ACTUAL=$(shasum -a 256 "/tmp/${ASSET}" | awk '{print $1}')
+else
+  ACTUAL=$(sha256 -q "/tmp/${ASSET}")
+fi
+test "$ACTUAL" = "$EXPECTED" || { echo "checksum verification failed" >&2; exit 1; }
 
 test -s "/tmp/${ASSET}"
 ```
 
-### 原生 Windows（amd64）
+### 原生 Windows（amd64 或 arm64）
 
-当前 Windows 成品面向 amd64。使用 PowerShell 下载并校验：
+把 `$goarch` 设置为 CPA 进程的架构，而不是 Windows 宿主机的架构：
 
 ```powershell
 $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/uf-hy/cpa-plugin-codexcomp/releases/latest'
 $version = $release.tag_name.TrimStart('v')
-$asset = "codexcomp_${version}_windows_amd64.zip"
+$goarch = 'amd64' # 原生 Windows ARM64 CPA 改为 'arm64'
+$asset = "codexcomp_${version}_windows_${goarch}.zip"
 $assetPath = Join-Path $env:TEMP $asset
 $checksumsPath = Join-Path $env:TEMP 'codexcomp-checksums.txt'
 
@@ -81,7 +103,7 @@ if ($actual -ne $expected) { throw 'checksum verification failed' }
 ## 2. 创建插件目录并解压
 
 ```bash
-# Linux 或 Docker
+# Linux、macOS、FreeBSD 或 Docker
 mkdir -p <CPA_DIR>/plugins
 unzip -o "/tmp/${ASSET}" -d <CPA_DIR>/plugins/
 ```
@@ -154,15 +176,23 @@ curl -sN <CPA_URL>/v1/responses \
 ## 卸载
 
 ```bash
-rm -f <CPA_DIR>/plugins/codexcomp*.so
+rm -f <CPA_DIR>/plugins/codexcomp*.so <CPA_DIR>/plugins/codexcomp*.dylib
+rm -f <CPA_DIR>/plugins/*/*/codexcomp-v*.so <CPA_DIR>/plugins/*/*/codexcomp-v*.dylib
 cd <CPA_DIR> && docker compose restart
 ```
 
-如果是独立部署，删除插件后改用对应的服务重启命令；原生 Windows 部署需删除对应的 `codexcomp*.dll`。
+原生 Windows：
+
+```powershell
+Remove-Item -Path '<CPA_DIR>\plugins\codexcomp*.dll' -Force -ErrorAction SilentlyContinue
+Remove-Item -Path '<CPA_DIR>\plugins\*\*\codexcomp-v*.dll' -Force -ErrorAction SilentlyContinue
+```
+
+如果是独立部署，删除插件后改用对应系统的服务重启命令。
 
 ## 排障
 
-- **插件没加载**：检查 CPA 日志中是否有 `codexcomp` 相关条目。确保 `plugins.enabled: true`，并确认 Linux 的 `.so` 或 Windows 的 `.dll` 位于 `plugins` 目录中。
+- **插件没加载**：检查 CPA 日志中是否有 `codexcomp` 相关条目。确保 `plugins.enabled: true`，并确认 Linux/FreeBSD 的 `.so`、macOS 的 `.dylib` 或 Windows 的 `.dll` 位于 `plugins` 目录中。
 - **Docker 没挂载插件目录**：确认 `./plugins:/CLIProxyAPI/plugins` 已写入 `docker-compose.yml`，并且宿主机上的 `<CPA_DIR>/plugins/codexcomp.so` 存在。
-- **系统或架构不匹配**：动态库必须匹配 CPA 容器或进程的运行系统与架构。Windows 宿主上的 Linux 容器使用 Linux `.so`；原生 Windows amd64 进程使用 Windows `.dll`。
+- **系统或架构不匹配**：动态库必须匹配 CPA 容器或进程的运行系统与架构。Windows 宿主上的 Linux 容器使用 Linux `.so`；原生 Windows amd64/arm64 进程使用对应架构的 Windows `.dll`；FreeBSD arm64 的 CPA `no-plugin` 成品不能加载插件。
 - **想看续写是否触发**：临时设置 `debug_log: true`，重启 CPA 后查看 CPA 日志。最终响应里也会有 `metadata.proxy_rounds`、`metadata.proxy_billed_usage` 和可能的 `metadata.proxy_stopped_reason`。CPA 如果配置了 `debug: true` 和 `logging-to-file: true`，日志文件在容器内的 `/CLIProxyAPI/logs/main.log`。
