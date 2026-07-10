@@ -40,8 +40,10 @@ jobs:
           fi
 
       - name: Clone CLIProxyAPI SDK (latest release)
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          CPA_TAG=$(curl -fsSL https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/latest | python3 -c "import sys,json;print(json.load(sys.stdin)['tag_name'])")
+          CPA_TAG=$(gh api repos/router-for-me/CLIProxyAPI/releases/latest --jq .tag_name)
           echo "Cloning CPA $CPA_TAG"
           git clone --depth 1 --branch "$CPA_TAG" https://github.com/router-for-me/CLIProxyAPI.git "$RUNNER_TEMP/CLIProxyAPI"
 
@@ -88,10 +90,11 @@ jobs:
 
               go mod edit -replace="github.com/router-for-me/CLIProxyAPI/v7=/opt/CLIProxyAPI"
               go mod tidy
-              CGO_ENABLED=1 GOOS=linux GOARCH="${GOARCH}" go test ./...
+              CGO_ENABLED=1 GOOS=linux GOARCH="${GOARCH}" go test -buildvcs=false ./...
               CGO_ENABLED=1 GOOS=linux GOARCH="${GOARCH}" go build \
                 -trimpath \
                 -ldflags="-s -w -X main.pluginVersion=${VERSION}" \
+                -buildvcs=false \
                 -buildmode=c-shared \
                 -o codexcomp.so
 
@@ -146,8 +149,10 @@ jobs:
           fi
 
       - name: Clone CLIProxyAPI SDK (latest release)
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          CPA_TAG=$(curl -fsSL https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/latest | python3 -c "import sys,json;print(json.load(sys.stdin)['tag_name'])")
+          CPA_TAG=$(gh api repos/router-for-me/CLIProxyAPI/releases/latest --jq .tag_name)
           echo "Cloning CPA $CPA_TAG"
           git clone --depth 1 --branch "$CPA_TAG" https://github.com/router-for-me/CLIProxyAPI.git "$RUNNER_TEMP/CLIProxyAPI"
           go mod edit -replace="github.com/router-for-me/CLIProxyAPI/v7=$RUNNER_TEMP/CLIProxyAPI"
@@ -160,8 +165,8 @@ jobs:
           MACOSX_DEPLOYMENT_TARGET: '12.0'
         run: |
           go mod tidy
-          go test ./...
-          go build -trimpath -ldflags="-s -w -X main.pluginVersion=${VERSION}" -buildmode=c-shared -o codexcomp.dylib
+          go test -buildvcs=false ./...
+          go build -trimpath -ldflags="-s -w -X main.pluginVersion=${VERSION}" -buildvcs=false -buildmode=c-shared -o codexcomp.dylib
 
       - name: Validate dylib
         run: |
@@ -248,12 +253,14 @@ jobs:
           "$CC" --version
 
       - name: Clone CLIProxyAPI SDK (latest release)
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/latest'
+          $cpaTag = gh api repos/router-for-me/CLIProxyAPI/releases/latest --jq .tag_name
           $sdkPath = Join-Path (Split-Path -Parent $env:GITHUB_WORKSPACE) 'CLIProxyAPI'
-          Write-Host "Cloning CPA $($release.tag_name)"
-          git clone --depth 1 --branch "$($release.tag_name)" 'https://github.com/router-for-me/CLIProxyAPI.git' "$sdkPath"
+          Write-Host "Cloning CPA $cpaTag"
+          git clone --depth 1 --branch "$cpaTag" 'https://github.com/router-for-me/CLIProxyAPI.git' "$sdkPath"
 
       - name: Build
         shell: msys2 {0}
@@ -265,7 +272,7 @@ jobs:
         run: |
           set -euo pipefail
           go mod tidy
-          go build -trimpath -ldflags="-s -w -X main.pluginVersion=${VERSION}" -buildmode=c-shared -o codexcomp.dll
+          go build -trimpath -ldflags="-s -w -X main.pluginVersion=${VERSION}" -buildvcs=false -buildmode=c-shared -o codexcomp.dll
 
       - name: Test
         shell: msys2 {0}
@@ -274,7 +281,7 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 1
           CC: ${{ matrix.cc }}
-        run: go test ./...
+        run: go test -buildvcs=false ./...
 
       - name: Validate DLL exports and dependencies
         shell: msys2 {0}
@@ -399,10 +406,11 @@ jobs:
             git clone --depth 1 --branch "$CPA_TAG" https://github.com/router-for-me/CLIProxyAPI.git /tmp/CLIProxyAPI
             go mod edit -replace="github.com/router-for-me/CLIProxyAPI/v7=/tmp/CLIProxyAPI"
             go mod tidy
-            go test ./...
+            go test -buildvcs=false ./...
             CGO_ENABLED=1 GOOS=freebsd GOARCH=amd64 go build \
               -trimpath \
               -ldflags="-s -w -X main.pluginVersion=${VERSION}" \
+              -buildvcs=false \
               -buildmode=c-shared \
               -o codexcomp.so
 
