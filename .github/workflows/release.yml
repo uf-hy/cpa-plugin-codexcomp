@@ -63,8 +63,66 @@ jobs:
           name: codexcomp-linux-${{ matrix.goarch }}
           path: codexcomp_*.zip
 
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          path-type: inherit
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            zip
+
+      - name: Clone CLIProxyAPI SDK (latest release)
+        shell: pwsh
+        run: |
+          $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/latest'
+          $sdkPath = Join-Path (Split-Path -Parent $env:GITHUB_WORKSPACE) 'CLIProxyAPI'
+          Write-Host "Cloning CPA $($release.tag_name)"
+          git clone --depth 1 --branch "$($release.tag_name)" 'https://github.com/router-for-me/CLIProxyAPI.git' "$sdkPath"
+
+      - name: Build
+        shell: msys2 {0}
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: 1
+          CC: gcc
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          go mod tidy
+          go build -trimpath -ldflags="-s -w -X main.pluginVersion=${VERSION}" -buildmode=c-shared -o codexcomp.dll
+
+      - name: Test
+        shell: msys2 {0}
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: 1
+          CC: gcc
+        run: go test ./...
+
+      - name: Package zip
+        shell: msys2 {0}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          zip "codexcomp_${VERSION}_windows_amd64.zip" codexcomp.dll
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codexcomp-windows-amd64
+          path: codexcomp_*.zip
+
   release:
-    needs: [build]
+    needs: [build, build-windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

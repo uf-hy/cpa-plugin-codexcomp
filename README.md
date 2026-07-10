@@ -75,16 +75,23 @@ https://raw.githubusercontent.com/uf-hy/cpa-plugin-codexcomp/master/registry.jso
 4. 在最下方点击对钩保存更改即可热重载
 5. 随后在插件商店页面找到 CodexComp（可用搜索功能），点击安装即可
 
-CPA 会自动下载对应架构的 `.so`、校验 SHA256、热重载，通常无需再次重启。Enjoy it!
+CPA 会自动下载对应系统和架构的动态库、校验 SHA256、热重载，通常无需再次重启。Enjoy it!
 
 ### 方式二：手动安装
 
 从 [Releases](https://github.com/uf-hy/cpa-plugin-codexcomp/releases/latest) 下载对应平台的 zip 包，解压后放到 `plugins/` 目录：
 
 ```bash
-# 确认架构后下载对应 zip，解压到 plugins 目录
+# Linux：确认架构后下载对应 zip，解压到 plugins 目录
 mkdir -p <CPA_DIR>/plugins
 unzip -o codexcomp_<version>_linux_<amd64|arm64>.zip -d <CPA_DIR>/plugins/
+```
+
+Windows 原生部署目前提供 amd64 成品，可在 PowerShell 中解压：
+
+```powershell
+New-Item -ItemType Directory -Force -Path '<CPA_DIR>\plugins' | Out-Null
+Expand-Archive -LiteralPath 'codexcomp_<version>_windows_amd64.zip' -DestinationPath '<CPA_DIR>\plugins' -Force
 ```
 
 在 `config.yaml` 中启用插件：
@@ -116,7 +123,16 @@ volumes:
 
 ```bash
 git clone https://github.com/router-for-me/CLIProxyAPI.git ../CLIProxyAPI
+# Linux
 go build -buildmode=c-shared -o codexcomp.so .
+```
+
+Windows 原生编译需要启用 CGO 并安装 GCC：
+
+```powershell
+git clone 'https://github.com/router-for-me/CLIProxyAPI.git' '..\CLIProxyAPI'
+$env:CGO_ENABLED = '1'
+go build -buildmode=c-shared -o codexcomp.dll .
 ```
 
 ## 配置

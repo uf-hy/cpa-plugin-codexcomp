@@ -4,7 +4,11 @@
 
 ## 1. 确认 CPA 运行时架构并下载成品
 
-插件 `.so` 必须匹配 **CPA 容器或进程的运行时架构**，不是宿主机架构。先确认 CPA 实际跑在什么架构上：
+插件动态库必须匹配 **CPA 容器或进程的运行系统与架构**，不是宿主机架构。Windows 上运行 Linux 容器时仍应下载 Linux `.so`；只有原生 Windows CPA 进程才使用 `.dll`。
+
+### Linux 或 Docker
+
+先确认 CPA 实际跑在什么架构上：
 
 ```bash
 # Docker 部署：查容器内架构（把 <service> 换成 docker-compose 里的服务名）
@@ -50,11 +54,44 @@ cd /tmp && grep "  ${ASSET}$" /tmp/checksums.txt | sha256sum -c - || { echo "che
 test -s "/tmp/${ASSET}"
 ```
 
+### 原生 Windows（amd64）
+
+当前 Windows 成品面向 amd64。使用 PowerShell 下载并校验：
+
+```powershell
+$release = Invoke-RestMethod -Uri 'https://api.github.com/repos/uf-hy/cpa-plugin-codexcomp/releases/latest'
+$version = $release.tag_name.TrimStart('v')
+$asset = "codexcomp_${version}_windows_amd64.zip"
+$assetPath = Join-Path $env:TEMP $asset
+$checksumsPath = Join-Path $env:TEMP 'codexcomp-checksums.txt'
+
+Invoke-WebRequest -Uri "https://github.com/uf-hy/cpa-plugin-codexcomp/releases/latest/download/$asset" -OutFile $assetPath
+Invoke-WebRequest -Uri 'https://github.com/uf-hy/cpa-plugin-codexcomp/releases/latest/download/checksums.txt' -OutFile $checksumsPath
+
+$checksumLine = Get-Content -LiteralPath $checksumsPath |
+  Where-Object { $_ -match "\s+$([regex]::Escape($asset))$" } |
+  Select-Object -First 1
+if (-not $checksumLine) { throw "checksums.txt 中没有 $asset" }
+
+$expected = ($checksumLine -split '\s+')[0].ToLowerInvariant()
+$actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $assetPath).Hash.ToLowerInvariant()
+if ($actual -ne $expected) { throw 'checksum verification failed' }
+```
+
 ## 2. 创建插件目录并解压
 
 ```bash
+# Linux 或 Docker
 mkdir -p <CPA_DIR>/plugins
 unzip -o "/tmp/${ASSET}" -d <CPA_DIR>/plugins/
+```
+
+原生 Windows：
+
+```powershell
+$pluginsDir = '<CPA_DIR>\plugins'
+New-Item -ItemType Directory -Force -Path $pluginsDir | Out-Null
+Expand-Archive -LiteralPath $assetPath -DestinationPath $pluginsDir -Force
 ```
 
 ## 3. 在 config.yaml 中启用插件
@@ -100,6 +137,8 @@ cd <CPA_DIR> && docker compose restart
 systemctl restart cli-proxy-api
 ```
 
+原生 Windows 部署请重启对应的 CPA 进程或 Windows 服务。
+
 ## 6. 验证
 
 ```bash
@@ -119,11 +158,11 @@ rm -f <CPA_DIR>/plugins/codexcomp*.so
 cd <CPA_DIR> && docker compose restart
 ```
 
-如果是独立部署，删除插件后改用对应的服务重启命令。
+如果是独立部署，删除插件后改用对应的服务重启命令；原生 Windows 部署需删除对应的 `codexcomp*.dll`。
 
 ## 排障
 
-- **插件没加载**：检查 CPA 日志中是否有 `codexcomp` 相关条目。确保 `plugins.enabled: true` 且 `.so` 文件在 `plugins` 目录中。
+- **插件没加载**：检查 CPA 日志中是否有 `codexcomp` 相关条目。确保 `plugins.enabled: true`，并确认 Linux 的 `.so` 或 Windows 的 `.dll` 位于 `plugins` 目录中。
 - **Docker 没挂载插件目录**：确认 `./plugins:/CLIProxyAPI/plugins` 已写入 `docker-compose.yml`，并且宿主机上的 `<CPA_DIR>/plugins/codexcomp.so` 存在。
-- **架构不匹配**：`.so` 必须匹配 CPA 容器或进程的运行时架构，不是宿主机架构。Apple Silicon 上跑 Docker 需要确认容器实际是 `linux/amd64` 还是 `linux/arm64`。
+- **系统或架构不匹配**：动态库必须匹配 CPA 容器或进程的运行系统与架构。Windows 宿主上的 Linux 容器使用 Linux `.so`；原生 Windows amd64 进程使用 Windows `.dll`。
 - **想看续写是否触发**：临时设置 `debug_log: true`，重启 CPA 后查看 CPA 日志。最终响应里也会有 `metadata.proxy_rounds`、`metadata.proxy_billed_usage` 和可能的 `metadata.proxy_stopped_reason`。CPA 如果配置了 `debug: true` 和 `logging-to-file: true`，日志文件在容器内的 `/CLIProxyAPI/logs/main.log`。
