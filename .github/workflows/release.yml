@@ -82,7 +82,10 @@ jobs:
 
       - name: Read tag message
         id: tagmsg
-        run: git tag -l --format='%(contents)' ${{ github.ref_name }} > /tmp/release_notes.md
+        run: |
+          NOTES_REF="refs/tags/release-notes-${GITHUB_RUN_ID}"
+          git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:${NOTES_REF}"
+          git for-each-ref "$NOTES_REF" --format='%(contents)' > /tmp/release_notes.md
 
       - name: Create release
         uses: softprops/action-gh-release@v2
