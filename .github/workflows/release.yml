@@ -11,55 +11,110 @@ on:
 permissions:
   contents: read
 
+env:
+  GO_VERSION: '1.26.4'
+
 jobs:
   build:
-    if: github.event_name == 'push'
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - goarch: amd64
-            cc: ''
-          - goarch: arm64
-            cc: aarch64-linux-gnu-gcc
-    runs-on: ubuntu-latest
+          - runner: ubuntu-latest
+            goarch: amd64
+            manylinux_image: quay.io/pypa/manylinux2014_x86_64
+          - runner: ubuntu-24.04-arm
+            goarch: arm64
+            manylinux_image: quay.io/pypa/manylinux2014_aarch64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.26'
-
-      - name: Install ARM64 cross-compiler
-        if: matrix.goarch == 'arm64'
-        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Resolve version
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            short_sha="${GITHUB_SHA:0:7}"
+            echo "VERSION=pr-${{ github.event.pull_request.number }}-${short_sha}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          fi
 
       - name: Clone CLIProxyAPI SDK (latest release)
-        run: |
-          CPA_TAG=$(curl -s https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/latest | python3 -c "import sys,json;print(json.load(sys.stdin)['tag_name'])")
-          echo "Cloning CPA $CPA_TAG"
-          git clone --depth 1 --branch "$CPA_TAG" https://github.com/router-for-me/CLIProxyAPI.git /tmp/CLIProxyAPI
-
-      - name: Replace SDK path
-        run: sed -i "s|../CLIProxyAPI|/tmp/CLIProxyAPI|g" go.mod
-
-      - name: Build
         env:
-          GOOS: linux
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 1
-          CC: ${{ matrix.cc }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          go mod tidy
-          go build -trimpath -ldflags="-s -w -X main.pluginVersion=${VERSION}" -buildmode=c-shared -o codexcomp.so
+          CPA_TAG=$(gh api repos/router-for-me/CLIProxyAPI/releases/latest --jq .tag_name)
+          echo "Cloning CPA $CPA_TAG"
+          git clone --depth 1 --branch "$CPA_TAG" https://github.com/router-for-me/CLIProxyAPI.git "$RUNNER_TEMP/CLIProxyAPI"
 
-      - name: Test (native only)
-        if: matrix.goarch == 'amd64'
-        run: go test ./...
+      - name: Build, test, and smoke test
+        env:
+          GOARCH: ${{ matrix.goarch }}
+          MANYLINUX_IMAGE: ${{ matrix.manylinux_image }}
+        run: |
+          set -euo pipefail
+          cat > /tmp/codexcomp-smoke.c <<'EOF'
+          #include <dlfcn.h>
+          #include <stdio.h>
+
+          int main(void) {
+            void *handle = dlopen("./codexcomp.so", RTLD_NOW | RTLD_LOCAL);
+            if (handle == NULL) {
+              fprintf(stderr, "dlopen failed: %s\n", dlerror());
+              return 1;
+            }
+            if (dlsym(handle, "cliproxy_plugin_init") == NULL) {
+              fprintf(stderr, "dlsym failed: %s\n", dlerror());
+              return 1;
+            }
+            puts("Packaged shared library loaded and cliproxy_plugin_init was found.");
+            return 0;
+          }
+          EOF
+
+          docker run --rm \
+            -v "$PWD:/src" \
+            -v "$RUNNER_TEMP/CLIProxyAPI:/opt/CLIProxyAPI:ro" \
+            -v "/tmp/codexcomp-smoke.c:/tmp/codexcomp-smoke.c:ro" \
+            -w /src \
+            -e GO_VERSION \
+            -e GOARCH \
+            -e VERSION \
+            "$MANYLINUX_IMAGE" \
+            bash -euo pipefail -c '
+              go_archive="go${GO_VERSION}.linux-${GOARCH}.tar.gz"
+              curl -fsSL "https://go.dev/dl/${go_archive}" -o "/tmp/${go_archive}"
+              rm -rf /usr/local/go
+              tar -C /usr/local -xzf "/tmp/${go_archive}"
+              export PATH="/usr/local/go/bin:${PATH}"
+
+              go mod edit -replace="github.com/router-for-me/CLIProxyAPI/v7=/opt/CLIProxyAPI"
+              go mod tidy
+              CGO_ENABLED=1 GOOS=linux GOARCH="${GOARCH}" go test -buildvcs=false ./...
+              CGO_ENABLED=1 GOOS=linux GOARCH="${GOARCH}" go build \
+                -trimpath \
+                -ldflags="-s -w -X main.pluginVersion=${VERSION}" \
+                -buildvcs=false \
+                -buildmode=c-shared \
+                -o codexcomp.so
+
+              readelf --wide --dyn-syms codexcomp.so | grep -F "cliproxy_plugin_init"
+              glibc_versions="$(readelf --version-info codexcomp.so | sed -n "s/.*Name: GLIBC_\([0-9.]*\).*/\1/p" | sort -Vu)"
+              if [[ -n "${glibc_versions}" ]]; then
+                printf "GLIBC versions:\n%s\n" "${glibc_versions}"
+                max_glibc="$(printf "%s\n" "${glibc_versions}" | sort -V | tail -n 1)"
+                if [[ "$(printf "2.17\n%s\n" "${max_glibc}" | sort -V | tail -n 1)" != "2.17" ]]; then
+                  echo "plugin requires GLIBC_${max_glibc}, expected GLIBC_2.17 or older" >&2
+                  exit 1
+                fi
+              fi
+
+              gcc /tmp/codexcomp-smoke.c -ldl -o /tmp/codexcomp-smoke
+              /tmp/codexcomp-smoke
+            '
 
       - name: Package zip
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
           zip "codexcomp_${VERSION}_linux_${{ matrix.goarch }}.zip" codexcomp.so
 
       - uses: actions/upload-artifact@v4
@@ -67,25 +122,105 @@ jobs:
           name: codexcomp-linux-${{ matrix.goarch }}
           path: codexcomp_*.zip
 
-  build-windows:
-    runs-on: windows-latest
+  build-darwin:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            goarch: amd64
+          - runner: macos-15
+            goarch: arm64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26'
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Resolve version
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            short_sha="${GITHUB_SHA:0:7}"
+            echo "VERSION=pr-${{ github.event.pull_request.number }}-${short_sha}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Clone CLIProxyAPI SDK (latest release)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          CPA_TAG=$(gh api repos/router-for-me/CLIProxyAPI/releases/latest --jq .tag_name)
+          echo "Cloning CPA $CPA_TAG"
+          git clone --depth 1 --branch "$CPA_TAG" https://github.com/router-for-me/CLIProxyAPI.git "$RUNNER_TEMP/CLIProxyAPI"
+          go mod edit -replace="github.com/router-for-me/CLIProxyAPI/v7=$RUNNER_TEMP/CLIProxyAPI"
+
+      - name: Build and test
+        env:
+          GOOS: darwin
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 1
+          MACOSX_DEPLOYMENT_TARGET: '12.0'
+        run: |
+          go mod tidy
+          go test -buildvcs=false ./...
+          go build -trimpath -ldflags="-s -w -X main.pluginVersion=${VERSION}" -buildvcs=false -buildmode=c-shared -o codexcomp.dylib
+
+      - name: Validate dylib
+        run: |
+          set -euo pipefail
+          nm -gU codexcomp.dylib | grep -F 'cliproxy_plugin_init'
+          otool -L codexcomp.dylib
+          python3 - <<'PY'
+          import ctypes
+          import pathlib
+
+          library = ctypes.CDLL(str(pathlib.Path("codexcomp.dylib").resolve()))
+          getattr(library, "cliproxy_plugin_init")
+          print("Packaged dylib loaded and cliproxy_plugin_init was found.")
+          PY
+
+      - name: Package zip
+        run: zip "codexcomp_${VERSION}_darwin_${{ matrix.goarch }}.zip" codexcomp.dylib
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codexcomp-darwin-${{ matrix.goarch }}
+          path: codexcomp_*.zip
+
+  build-windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            goarch: amd64
+            msystem: UCRT64
+            cc: gcc
+            cc_package: mingw-w64-ucrt-x86_64-toolchain
+            expected_target: x86_64-w64-mingw32
+          - runner: windows-11-arm
+            goarch: arm64
+            msystem: CLANGARM64
+            cc: clang
+            cc_package: mingw-w64-clang-aarch64-toolchain
+            expected_target: aarch64-w64-windows-gnu
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
 
       - name: Resolve version
         shell: pwsh
         run: |
           if ($env:GITHUB_EVENT_NAME -eq 'pull_request') {
-            $event = Get-Content -Raw -LiteralPath $env:GITHUB_EVENT_PATH | ConvertFrom-Json
-            $shortSha = $event.pull_request.head.sha.Substring(0, 7)
-            $version = "pr-$($event.number)-$shortSha"
+            $shortSha = $env:GITHUB_SHA.Substring(0, 7)
+            $version = "pr-${{ github.event.pull_request.number }}-$shortSha"
           } else {
             $version = $env:GITHUB_REF_NAME -replace '^v', ''
           }
@@ -94,59 +229,59 @@ jobs:
 
       - uses: msys2/setup-msys2@v2
         with:
-          msystem: UCRT64
+          msystem: ${{ matrix.msystem }}
           path-type: inherit
           update: true
           install: >-
-            mingw-w64-ucrt-x86_64-gcc
-            mingw-w64-ucrt-x86_64-binutils
+            ${{ matrix.cc_package }}
             zip
 
-      - name: Verify UCRT64 toolchain
+      - name: Verify native toolchain
         shell: msys2 {0}
+        env:
+          CC: ${{ matrix.cc }}
+          EXPECTED_TARGET: ${{ matrix.expected_target }}
         run: |
           set -euo pipefail
           go_path="$(command -v go)"
-          gcc_path="$(command -v gcc)"
+          cc_path="$(command -v "$CC")"
           zip_path="$(command -v zip)"
           objdump_path="$(command -v objdump)"
-          printf 'go=%s\ngcc=%s\nzip=%s\nobjdump=%s\n' "$go_path" "$gcc_path" "$zip_path" "$objdump_path"
-          case "$gcc_path" in
-            /ucrt64/bin/gcc|/ucrt64/bin/gcc.exe) ;;
-            *) echo "Expected UCRT64 gcc, got $gcc_path" >&2; exit 1 ;;
-          esac
-          test "$(gcc -dumpmachine)" = "x86_64-w64-mingw32"
+          printf 'go=%s\ncc=%s\nzip=%s\nobjdump=%s\n' "$go_path" "$cc_path" "$zip_path" "$objdump_path"
+          test "$("$CC" -dumpmachine)" = "$EXPECTED_TARGET"
           go version
-          gcc --version
+          "$CC" --version
 
       - name: Clone CLIProxyAPI SDK (latest release)
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/latest'
+          $cpaTag = gh api repos/router-for-me/CLIProxyAPI/releases/latest --jq .tag_name
           $sdkPath = Join-Path (Split-Path -Parent $env:GITHUB_WORKSPACE) 'CLIProxyAPI'
-          Write-Host "Cloning CPA $($release.tag_name)"
-          git clone --depth 1 --branch "$($release.tag_name)" 'https://github.com/router-for-me/CLIProxyAPI.git' "$sdkPath"
+          Write-Host "Cloning CPA $cpaTag"
+          git clone --depth 1 --branch "$cpaTag" 'https://github.com/router-for-me/CLIProxyAPI.git' "$sdkPath"
 
       - name: Build
         shell: msys2 {0}
         env:
           GOOS: windows
-          GOARCH: amd64
+          GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 1
-          CC: gcc
+          CC: ${{ matrix.cc }}
         run: |
           set -euo pipefail
           go mod tidy
-          go build -trimpath -ldflags="-s -w -X main.pluginVersion=${VERSION}" -buildmode=c-shared -o codexcomp.dll
+          go build -trimpath -ldflags="-s -w -X main.pluginVersion=${VERSION}" -buildvcs=false -buildmode=c-shared -o codexcomp.dll
 
       - name: Test
         shell: msys2 {0}
         env:
           GOOS: windows
-          GOARCH: amd64
+          GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 1
-          CC: gcc
-        run: go test ./...
+          CC: ${{ matrix.cc }}
+        run: go test -buildvcs=false ./...
 
       - name: Validate DLL exports and dependencies
         shell: msys2 {0}
@@ -166,16 +301,16 @@ jobs:
           fi
 
       - name: Package zip
-        shell: msys2 {0}
+        shell: pwsh
         run: |
-          set -euo pipefail
-          zip "codexcomp_${VERSION}_windows_amd64.zip" codexcomp.dll
+          $ErrorActionPreference = 'Stop'
+          Compress-Archive -LiteralPath 'codexcomp.dll' -DestinationPath "codexcomp_$($env:VERSION)_windows_${{ matrix.goarch }}.zip" -Force
 
       - name: Smoke test packaged DLL
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $zip = Get-ChildItem -LiteralPath $env:GITHUB_WORKSPACE -Filter 'codexcomp_*_windows_amd64.zip' |
+          $zip = Get-ChildItem -LiteralPath $env:GITHUB_WORKSPACE -Filter 'codexcomp_*_windows_${{ matrix.goarch }}.zip' |
             Select-Object -First 1
           if (-not $zip) { throw 'Windows release zip was not created' }
 
@@ -223,11 +358,91 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: codexcomp-windows-amd64
+          name: codexcomp-windows-${{ matrix.goarch }}
+          path: codexcomp_*.zip
+
+  build-freebsd:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve versions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            short_sha="${GITHUB_SHA:0:7}"
+            echo "VERSION=pr-${{ github.event.pull_request.number }}-${short_sha}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          fi
+          echo "CPA_TAG=$(gh api repos/router-for-me/CLIProxyAPI/releases/latest --jq .tag_name)" >> "$GITHUB_ENV"
+
+      - name: Build, test, and smoke test in FreeBSD amd64
+        uses: vmactions/freebsd-vm@5a72679103d223925653750faa878a143340fbd0
+        with:
+          release: '13.5'
+          arch: x86_64
+          usesh: true
+          envs: 'VERSION CPA_TAG GO_VERSION'
+          prepare: pkg install -y git jq zip
+          run: |
+            set -eu
+            GO_ARCHIVE="go${GO_VERSION}.freebsd-amd64.tar.gz"
+            fetch -o /tmp/go-downloads.json 'https://go.dev/dl/?mode=json&include=all'
+            EXPECTED_GO_SHA256=$(jq -r \
+              --arg version "go${GO_VERSION}" \
+              --arg filename "$GO_ARCHIVE" \
+              '.[] | select(.version == $version) | .files[] | select(.filename == $filename) | .sha256' \
+              /tmp/go-downloads.json)
+            test -n "$EXPECTED_GO_SHA256" && test "$EXPECTED_GO_SHA256" != "null"
+            fetch -o /tmp/go.tar.gz "https://go.dev/dl/${GO_ARCHIVE}"
+            test "$(sha256 -q /tmp/go.tar.gz)" = "$EXPECTED_GO_SHA256"
+            rm -rf /usr/local/go
+            tar -C /usr/local -xzf /tmp/go.tar.gz
+            export PATH="/usr/local/go/bin:$PATH"
+
+            rm -rf /tmp/CLIProxyAPI
+            git clone --depth 1 --branch "$CPA_TAG" https://github.com/router-for-me/CLIProxyAPI.git /tmp/CLIProxyAPI
+            go mod edit -replace="github.com/router-for-me/CLIProxyAPI/v7=/tmp/CLIProxyAPI"
+            go mod tidy
+            go test -buildvcs=false ./...
+            CGO_ENABLED=1 GOOS=freebsd GOARCH=amd64 go build \
+              -trimpath \
+              -ldflags="-s -w -X main.pluginVersion=${VERSION}" \
+              -buildvcs=false \
+              -buildmode=c-shared \
+              -o codexcomp.so
+
+            cat > /tmp/codexcomp-smoke.c <<'EOF'
+            #include <dlfcn.h>
+            #include <stdio.h>
+
+            int main(void) {
+              void *handle = dlopen("./codexcomp.so", RTLD_NOW | RTLD_LOCAL);
+              if (handle == NULL) {
+                fprintf(stderr, "dlopen failed: %s\n", dlerror());
+                return 1;
+              }
+              if (dlsym(handle, "cliproxy_plugin_init") == NULL) {
+                fprintf(stderr, "dlsym failed: %s\n", dlerror());
+                return 1;
+              }
+              puts("Packaged shared library loaded and cliproxy_plugin_init was found.");
+              return 0;
+            }
+            EOF
+            cc /tmp/codexcomp-smoke.c -ldl -o /tmp/codexcomp-smoke
+            /tmp/codexcomp-smoke
+            zip "codexcomp_${VERSION}_freebsd_amd64.zip" codexcomp.so
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codexcomp-freebsd-amd64
           path: codexcomp_*.zip
 
   release:
-    needs: [build, build-windows]
+    needs: [build, build-darwin, build-windows, build-freebsd]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write

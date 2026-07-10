@@ -62,18 +62,16 @@ CodexCont is the original continuation mechanism. codexcomp refined it into a tr
 
 ### Option 1: CPA WebUI (recommended)
 
-Add this repository as a plugin source in CPA's WebUI:
+CodexComp is listed in the [official CLIProxyAPI Plugins Store](https://github.com/router-for-me/CLIProxyAPI-Plugins-Store/pull/24):
 
 1. Open **Config Panel → Visual Editor → Full → Advanced & Experimental → Plugins**
 2. Ensure the plugin system is enabled
-3. Under "Third-party Plugin Sources", click "Add" and enter:
+3. Search for CodexComp on the plugin store page and click install
+4. If the entry is not visible yet, refresh the store or upgrade CPA. As a fallback, add the following URL as a third-party plugin source:
 
-```
+```text
 https://raw.githubusercontent.com/uf-hy/cpa-plugin-codexcomp/master/registry.json
 ```
-
-4. Click the checkmark at the bottom to save and hot-reload
-5. Find CodexComp in the plugin store page (use search if needed), and click install
 
 CPA will download the dynamic library matching the current system and architecture, verify SHA256, and hot-reload — usually no second restart needed. Enjoy it!
 
@@ -81,17 +79,26 @@ CPA will download the dynamic library matching the current system and architectu
 
 Download the latest zip from [Releases](https://github.com/uf-hy/cpa-plugin-codexcomp/releases/latest), extract to the `plugins/` directory:
 
+| CPA runtime OS | Architecture | Asset | Dynamic library |
+|---|---|---|---|
+| Linux | amd64 / arm64 | `codexcomp_<version>_linux_<arch>.zip` | `codexcomp.so` |
+| macOS | amd64 / arm64 | `codexcomp_<version>_darwin_<arch>.zip` | `codexcomp.dylib` |
+| Windows | amd64 / arm64 | `codexcomp_<version>_windows_<arch>.zip` | `codexcomp.dll` |
+| FreeBSD | amd64 | `codexcomp_<version>_freebsd_amd64.zip` | `codexcomp.so` |
+
+> CLIProxyAPI's official FreeBSD arm64 asset is a `no-plugin` build, so no matching plugin asset is published.
+
 ```bash
-# Linux
+# Linux, macOS, or FreeBSD
 mkdir -p <CPA_DIR>/plugins
-unzip -o codexcomp_<version>_linux_<amd64|arm64>.zip -d <CPA_DIR>/plugins/
+unzip -o "codexcomp_<version>_<goos>_<arch>.zip" -d <CPA_DIR>/plugins/
 ```
 
-Native Windows releases currently target amd64. Extract one with PowerShell:
+Native Windows releases target amd64 and arm64. Extract one with PowerShell:
 
 ```powershell
 New-Item -ItemType Directory -Force -Path '<CPA_DIR>\plugins' | Out-Null
-Expand-Archive -LiteralPath 'codexcomp_<version>_windows_amd64.zip' -DestinationPath '<CPA_DIR>\plugins' -Force
+Expand-Archive -LiteralPath 'codexcomp_<version>_windows_<arch>.zip' -DestinationPath '<CPA_DIR>\plugins' -Force
 ```
 
 Enable the plugin in `config.yaml`:
@@ -119,15 +126,18 @@ For AI-agent-friendly installation steps, see [SETUP.md](SETUP.md).
 
 ### Building from Source
 
-The `go.mod` has a `replace` directive pointing to an adjacent CLIProxyAPI directory. Clone the dependency first:
+The `go.mod` has a `replace` directive pointing to an adjacent CLIProxyAPI directory. Clone the dependency first. See the [release workflow](.github/workflows/release.yml) for the authoritative target toolchains and validation steps:
 
 ```bash
 git clone https://github.com/router-for-me/CLIProxyAPI.git ../CLIProxyAPI
-# Linux
+# Linux or FreeBSD
 go build -buildmode=c-shared -o codexcomp.so .
+
+# macOS
+go build -buildmode=c-shared -o codexcomp.dylib .
 ```
 
-Native Windows builds require CGO and GCC:
+Native Windows builds require CGO and a C toolchain matching the target architecture: MSYS2 UCRT64/GCC for amd64, or MSYS2 CLANGARM64/Clang for arm64.
 
 ```powershell
 git clone 'https://github.com/router-for-me/CLIProxyAPI.git' '..\CLIProxyAPI'
