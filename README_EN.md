@@ -75,15 +75,23 @@ https://raw.githubusercontent.com/uf-hy/cpa-plugin-codexcomp/master/registry.jso
 4. Click the checkmark at the bottom to save and hot-reload
 5. Find CodexComp in the plugin store page (use search if needed), and click install
 
-CPA will download the correct architecture `.so`, verify SHA256, and hot-reload — usually no second restart needed. Enjoy it!
+CPA will download the dynamic library matching the current system and architecture, verify SHA256, and hot-reload — usually no second restart needed. Enjoy it!
 
 ### Option 2: Manual Installation
 
 Download the latest zip from [Releases](https://github.com/uf-hy/cpa-plugin-codexcomp/releases/latest), extract to the `plugins/` directory:
 
 ```bash
+# Linux
 mkdir -p <CPA_DIR>/plugins
 unzip -o codexcomp_<version>_linux_<amd64|arm64>.zip -d <CPA_DIR>/plugins/
+```
+
+Native Windows releases currently target amd64. Extract one with PowerShell:
+
+```powershell
+New-Item -ItemType Directory -Force -Path '<CPA_DIR>\plugins' | Out-Null
+Expand-Archive -LiteralPath 'codexcomp_<version>_windows_amd64.zip' -DestinationPath '<CPA_DIR>\plugins' -Force
 ```
 
 Enable the plugin in `config.yaml`:
@@ -115,7 +123,16 @@ The `go.mod` has a `replace` directive pointing to an adjacent CLIProxyAPI direc
 
 ```bash
 git clone https://github.com/router-for-me/CLIProxyAPI.git ../CLIProxyAPI
+# Linux
 go build -buildmode=c-shared -o codexcomp.so .
+```
+
+Native Windows builds require CGO and GCC:
+
+```powershell
+git clone 'https://github.com/router-for-me/CLIProxyAPI.git' '..\CLIProxyAPI'
+$env:CGO_ENABLED = '1'
+go build -buildmode=c-shared -o codexcomp.dll .
 ```
 
 ## Configuration
