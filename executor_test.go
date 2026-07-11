@@ -592,8 +592,8 @@ func TestDecodeFoldConfigModelsDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(cfg.Models, []string{"gpt-5.5", "gpt-5.6-luna"}) {
-		t.Errorf("default models should be [gpt-5.5 gpt-5.6-luna], got %v", cfg.Models)
+	if !reflect.DeepEqual(cfg.Models, []string{"gpt-5.5", "gpt-5.6-luna", "gpt-5.6-terra"}) {
+		t.Errorf("default models should be [gpt-5.5 gpt-5.6-luna gpt-5.6-terra], got %v", cfg.Models)
 	}
 	if cfg.MinReasoningTokens != nil {
 		t.Errorf("min_reasoning_tokens should be disabled by default, got %v", cfg.MinReasoningTokens)
@@ -639,6 +639,25 @@ func TestDecodeFoldConfigModelsConfigured(t *testing.T) {
 	}
 }
 
+// TestDecodeFoldConfigModelsReplacesDefaults verifies that a user-specified
+// models list fully replaces the defaults rather than appending to them.
+// Configuring [gpt-5.5, gpt-5.6-luna] must NOT pull in gpt-5.6-terra even
+// though terra is in defaultModels().
+func TestDecodeFoldConfigModelsReplacesDefaults(t *testing.T) {
+	cfg, err := decodeFoldConfig([]byte("models:\n  - gpt-5.5\n  - gpt-5.6-luna\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Models) != 2 {
+		t.Fatalf("configured models should replace (not append) defaults; got %v", cfg.Models)
+	}
+	for _, m := range cfg.Models {
+		if m == "gpt-5.6-terra" {
+			t.Errorf("terra must not appear when user lists only gpt-5.5 and gpt-5.6-luna; got %v", cfg.Models)
+		}
+	}
+}
+
 func TestDecodeFoldConfigModelsWhitespace(t *testing.T) {
 	cfg, err := decodeFoldConfig([]byte("models:\n  - '  gpt-5.5  '\n  - '  gpt-5.6-luna  '\n"))
 	if err != nil {
@@ -657,7 +676,7 @@ func TestDecodeFoldConfigModelsEmptyFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(cfg.Models, []string{"gpt-5.5", "gpt-5.6-luna"}) {
+	if !reflect.DeepEqual(cfg.Models, []string{"gpt-5.5", "gpt-5.6-luna", "gpt-5.6-terra"}) {
 		t.Errorf("empty models should fallback to default, got %v", cfg.Models)
 	}
 }
@@ -667,7 +686,7 @@ func TestDecodeFoldConfigModelsEmptyStringFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(cfg.Models, []string{"gpt-5.5", "gpt-5.6-luna"}) {
+	if !reflect.DeepEqual(cfg.Models, []string{"gpt-5.5", "gpt-5.6-luna", "gpt-5.6-terra"}) {
 		t.Errorf("all-empty models should fallback to default, got %v", cfg.Models)
 	}
 }
@@ -682,6 +701,9 @@ func TestModelInAllowlistDefault(t *testing.T) {
 	}
 	if !modelInAllowlist("gpt-5.6-luna") {
 		t.Error("gpt-5.6-luna should be in default allowlist")
+	}
+	if !modelInAllowlist("gpt-5.6-terra") {
+		t.Error("gpt-5.6-terra should be in default allowlist")
 	}
 	if modelInAllowlist("gpt-4o") {
 		t.Error("gpt-4o should not be in default allowlist")

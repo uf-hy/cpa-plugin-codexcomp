@@ -66,7 +66,7 @@ func defaultFoldConfig() foldConfig {
 }
 
 func defaultModels() []string {
-	return []string{"gpt-5.5", "gpt-5.6-luna"}
+	return []string{"gpt-5.5", "gpt-5.6-luna", "gpt-5.6-terra"}
 }
 
 func currentFoldConfig() foldConfig {

@@ -5,7 +5,7 @@
 
 [简体中文](README.md) | [English](README_EN.md)
 
-A [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) plugin that detects and repairs reasoning truncation for configurable models (defaults: `gpt-5.5` and `gpt-5.6-luna`) in streaming requests, supporting OpenAI Responses API, OpenAI Chat Completions API, and Anthropic Messages API client protocols
+A [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) plugin that detects and repairs reasoning truncation for configurable models (defaults: `gpt-5.5`, `gpt-5.6-luna`, and `gpt-5.6-terra`) in streaming requests, supporting OpenAI Responses API, OpenAI Chat Completions API, and Anthropic Messages API client protocols
 
 In agent scenarios, gpt-5.5 reasoning tokens can stop exactly at 518n−2 (516, 1034, 1552, ...). This truncation can cause unexpected degradation. When the plugin detects this kind of truncation, it replays encrypted_content to continue reasoning, then folds multiple rounds into a single response that stays fully transparent to the downstream client.
 
@@ -21,7 +21,7 @@ For manual installation by humans, see [Installation](#installation).
 
 ## How It Works
 
-The plugin intercepts streaming requests for models in the configured list (defaults: `gpt-5.5` and `gpt-5.6-luna`) through CPA's C ABI plugin system, communicating with the upstream in codex format internally. Each time the upstream request finishes, it checks whether reasoning_tokens matches the 518n−2 pattern. If it matches and encrypted_content exists, it triggers continuation
+The plugin intercepts streaming requests for models in the configured list (defaults: `gpt-5.5`, `gpt-5.6-luna`, and `gpt-5.6-terra`) through CPA's C ABI plugin system, communicating with the upstream in codex format internally. Each time the upstream request finishes, it checks whether reasoning_tokens matches the 518n−2 pattern. If it matches and encrypted_content exists, it triggers continuation
 
 The continuation round replays the original input, all previous thinking content, and a prompt message so the model continues from the truncation point rather than starting over
 
@@ -35,7 +35,7 @@ gpt-5.5 with high reasoning effort can take 25-30 seconds before the first SSE e
 
 The plugin only intercepts requests that match **all** of:
 
-- Model is included in the `models` configuration list (defaults: `gpt-5.5` and `gpt-5.6-luna`)
+- Model is included in the `models` configuration list (defaults: `gpt-5.5`, `gpt-5.6-luna`, and `gpt-5.6-terra`)
 - Client protocol is `openai-response` (Responses API), `openai` (Chat Completions API), or `claude` (Anthropic Messages API)
 - Request is streaming (`stream: true`)
 - No `previous_response_id` present
@@ -156,6 +156,7 @@ plugins:
       models:
         - gpt-5.5
         - gpt-5.6-luna
+        - gpt-5.6-terra
       marker_text: "Continue thinking..."
       max_continue: 3
       max_tier_n: 6
@@ -170,7 +171,7 @@ plugins:
 
 `debug_log` emits configuration and continuation-round details through CPA host log. It defaults to false and is intended for troubleshooting.
 
-`models` is the exact model ID allow-list intercepted by the plugin. It defaults to `gpt-5.5` and `gpt-5.6-luna`. Luna is included because the 516-token truncation pattern has been observed on it. Terra and Sol are not included by default because the same issue has not been observed; add them manually if it appears later:
+`models` is the exact model ID allow-list intercepted by the plugin. It defaults to `gpt-5.5`, `gpt-5.6-luna`, and `gpt-5.6-terra`. Luna and Terra are included because the 516-token truncation pattern has been observed on both. Sol is not included by default because the same issue has not been observed. Setting this list replaces the defaults (does not append); to add a model, include the defaults plus your additions:
 
 ```yaml
 plugins:
@@ -182,6 +183,8 @@ plugins:
         - gpt-5.6-terra
         - gpt-5.6-sol
 ```
+
+> **Known limitation for Terra:** In addition to the standard 516 truncation, Terra occasionally exhibits other reasoning truncations that do not follow the 518n−2 sequence (e.g. token counts like 342, 428, 477). These are irregular and sparse, and some reflect the model's normal low-reasoning behavior on simpler problems. The plugin does not special-case these non-standard truncations to avoid uniformly continuing normal low-reasoning requests and wasting time and tokens. Report it if you see persistent reproduction.
 
 **Experimental and not recommended: observed effectiveness is poor because continuation rounds often add few or no reasoning tokens.** `min_reasoning_tokens` is an optional per-model minimum reasoning-token threshold. It has no default and is disabled unless explicitly configured. Once configured, it applies to every intercepted request for that model regardless of the requested reasoning effort. When cumulative folded reasoning tokens remain below the configured value, the plugin attempts another continuation:
 

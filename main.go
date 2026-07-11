@@ -193,7 +193,7 @@ func pluginRegistration() registration {
 				{
 					Name:        "models",
 					Type:        pluginapi.ConfigFieldTypeArray,
-					Description: "List of exact model identifiers to intercept. Defaults to gpt-5.5 and gpt-5.6-luna.",
+					Description: "Exact model IDs to intercept. Defaults: gpt-5.5, gpt-5.6-luna, gpt-5.6-terra. Replaces defaults, not appends; to add a model, include the defaults plus your additions.",
 				},
 				{
 					Name:        "marker_text",
