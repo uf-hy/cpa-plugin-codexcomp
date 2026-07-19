@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -43,6 +44,7 @@ const (
 const (
 	continueReasonTruncation         = "truncation"
 	continueReasonLowReasoningTokens = "low_reasoning_tokens"
+	startupProbeWindow               = 250 * time.Millisecond
 )
 
 var sessionHeaders = []string{
@@ -255,26 +257,95 @@ func executeStream(raw []byte) ([]byte, error) {
 		origInput = append([]any(nil), origInput...)
 	}
 
-	go func() {
-		defer func() {
-			if recovered := recover(); recovered != nil {
-				closeStream(streamID, fmt.Sprintf("fold panic: %v", recovered))
-			}
-		}()
-		runFold(baseBody, origInput, req, streamID)
-		closeStream(streamID, "")
-	}()
+	fs := newFoldState(baseBody, origInput, req, req.HostCallbackID)
+	firstRoundCh, firstRound := probeRoundStart(fs.startRound, startupProbeWindow)
+	if firstRound != nil && firstRound.err != nil {
+		status := http.StatusBadGateway
+		if upstreamErr, ok := firstRound.err.(*upstreamError); ok {
+			status = upstreamErr.status
+		}
+		return errorEnvelopeWithStatus("executor_error", firstRound.err.Error(), status), nil
+	}
+	if firstRound != nil {
+		firstRoundCh <- *firstRound
+	}
+	runFoldAsync(fs, firstRoundCh, streamID)
 
 	return okEnvelope(map[string]any{
 		"headers": http.Header{"Content-Type": []string{"text/event-stream"}},
 	})
 }
 
-func runFold(baseBody map[string]any, origInput []any, req rpcExecutorRequest, streamID string) {
-	fs := newFoldState(baseBody, origInput, req, req.HostCallbackID)
+func probeRoundStart(start func() (hostModelStreamResponse, error), window time.Duration) (chan roundStartResult, *roundStartResult) {
+	firstRoundCh := make(chan roundStartResult, 1)
+	go func() {
+		result := roundStartResult{}
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				result.err = fmt.Errorf("start round panic: %v", recovered)
+			}
+			firstRoundCh <- result
+		}()
+		result.response, result.err = start()
+	}()
 
+	timer := time.NewTimer(window)
+	defer timer.Stop()
+	var firstRound *roundStartResult
+	select {
+	case result := <-firstRoundCh:
+		firstRound = &result
+	case <-timer.C:
+		// Prefer a startup result that completed at the probe boundary.
+		select {
+		case result := <-firstRoundCh:
+			firstRound = &result
+		default:
+		}
+	}
+	return firstRoundCh, firstRound
+}
+
+type roundStartResult struct {
+	response hostModelStreamResponse
+	err      error
+}
+
+func runFoldAsync(fs *foldState, firstRound <-chan roundStartResult, streamID string) {
+	go func() {
+		closeErr := ""
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				closeErr = fmt.Sprintf("fold panic: %v", recovered)
+			}
+			closeStreamSafely(streamID, closeErr)
+		}()
+		runFold(fs, <-firstRound, streamID)
+	}()
+}
+
+func closeStreamSafely(streamID, errMsg string) {
+	defer func() {
+		_ = recover()
+	}()
+	closeStream(streamID, errMsg)
+}
+
+func runFold(fs *foldState, firstRound roundStartResult, streamID string) {
+	pendingRound := &firstRound
 	for {
-		terminal, usage, _, roundErr := fs.openRound(streamID)
+		var terminal map[string]any
+		var usage map[string]any
+		var roundErr error
+		if pendingRound != nil {
+			roundErr = pendingRound.err
+			if roundErr == nil {
+				terminal, usage, _, roundErr = fs.consumeRound(pendingRound.response, streamID)
+			}
+			pendingRound = nil
+		} else {
+			terminal, usage, _, roundErr = fs.openRound(streamID)
+		}
 
 		if roundErr != nil {
 			var fev map[string]any
@@ -393,6 +464,14 @@ func newFoldState(baseBody map[string]any, origInput []any, req rpcExecutorReque
 }
 
 func (fs *foldState) openRound(streamID string) (map[string]any, map[string]any, http.Header, error) {
+	streamResp, err := fs.startRound()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return fs.consumeRound(streamResp, streamID)
+}
+
+func (fs *foldState) startRound() (hostModelStreamResponse, error) {
 	fs.roundNo++
 	fs.roundReasoning = nil
 	fs.kind = map[int]string{}
@@ -406,7 +485,7 @@ func (fs *foldState) openRound(streamID string) (map[string]any, map[string]any,
 	var err error
 	bodyBytes, err = json.Marshal(nextRoundBody(fs.baseBody, append(fs.origInput, fs.replayTail...)))
 	if err != nil {
-		return nil, nil, nil, err
+		return hostModelStreamResponse{}, err
 	}
 
 	entryProtocol := "codex"
@@ -426,22 +505,26 @@ func (fs *foldState) openRound(streamID string) (map[string]any, map[string]any,
 		HostCallbackID: fs.hostCallbackID,
 	})
 	if err != nil {
-		return nil, nil, nil, err
+		return hostModelStreamResponse{}, err
 	}
 
 	var streamResp hostModelStreamResponse
 	if err := json.Unmarshal(result, &streamResp); err != nil {
-		return nil, nil, nil, fmt.Errorf("decode host.model.execute_stream result: %w", err)
+		return hostModelStreamResponse{}, fmt.Errorf("decode host.model.execute_stream result: %w", err)
 	}
 	if streamResp.StatusCode >= 400 {
 		if streamResp.StreamID != "" {
 			_, _ = callHost(pluginabi.MethodHostModelStreamClose, map[string]any{"stream_id": streamResp.StreamID})
 		}
-		return nil, nil, nil, &upstreamError{status: streamResp.StatusCode, msg: fmt.Sprintf("upstream returned status %d", streamResp.StatusCode)}
+		return hostModelStreamResponse{}, &upstreamError{status: streamResp.StatusCode, msg: fmt.Sprintf("upstream returned status %d", streamResp.StatusCode)}
 	}
 	if streamResp.StreamID == "" {
-		return nil, nil, nil, fmt.Errorf("host.model.execute_stream returned empty stream_id")
+		return hostModelStreamResponse{}, fmt.Errorf("host.model.execute_stream returned empty stream_id")
 	}
+	return streamResp, nil
+}
+
+func (fs *foldState) consumeRound(streamResp hostModelStreamResponse, streamID string) (map[string]any, map[string]any, http.Header, error) {
 	defer func() {
 		_, _ = callHost(pluginabi.MethodHostModelStreamClose, map[string]any{"stream_id": streamResp.StreamID})
 	}()

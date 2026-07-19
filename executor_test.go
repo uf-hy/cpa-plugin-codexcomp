@@ -2,10 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -472,6 +474,68 @@ func TestFailedEvent(t *testing.T) {
 	errObj, _ := resp["error"].(map[string]any)
 	if errObj["code"].(int) != 429 {
 		t.Errorf("code: got %v", errObj["code"])
+	}
+}
+
+func TestErrorEnvelopeWithStatus(t *testing.T) {
+	raw := errorEnvelopeWithStatus("executor_error", "no available account", http.StatusBadGateway)
+	var got envelope
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	if got.OK || got.Error == nil {
+		t.Fatalf("expected error envelope, got %#v", got)
+	}
+	if got.Error.Code != "executor_error" || got.Error.Message != "no available account" {
+		t.Fatalf("unexpected error: %#v", got.Error)
+	}
+	if got.Error.HTTPStatus != http.StatusBadGateway {
+		t.Fatalf("http_status = %d, want %d", got.Error.HTTPStatus, http.StatusBadGateway)
+	}
+}
+
+func TestProbeRoundStartImmediateError(t *testing.T) {
+	want := errors.New("no provider")
+	_, result := probeRoundStart(func() (hostModelStreamResponse, error) {
+		return hostModelStreamResponse{}, want
+	}, time.Second)
+	if result == nil {
+		t.Fatal("expected immediate result")
+	}
+	if !errors.Is(result.err, want) {
+		t.Fatalf("error = %v, want %v", result.err, want)
+	}
+}
+
+func TestProbeRoundStartDelayedSuccess(t *testing.T) {
+	release := make(chan struct{})
+	results, immediate := probeRoundStart(func() (hostModelStreamResponse, error) {
+		<-release
+		return hostModelStreamResponse{StatusCode: http.StatusOK, StreamID: "upstream-1"}, nil
+	}, time.Millisecond)
+	if immediate != nil {
+		t.Fatalf("expected pending result, got %#v", immediate)
+	}
+	close(release)
+	select {
+	case result := <-results:
+		if result.err != nil || result.response.StreamID != "upstream-1" {
+			t.Fatalf("unexpected result: %#v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for delayed result")
+	}
+}
+
+func TestProbeRoundStartConvertsPanic(t *testing.T) {
+	_, result := probeRoundStart(func() (hostModelStreamResponse, error) {
+		panic("boom")
+	}, time.Second)
+	if result == nil || result.err == nil {
+		t.Fatalf("expected panic error, got %#v", result)
+	}
+	if !strings.Contains(result.err.Error(), "start round panic: boom") {
+		t.Fatalf("unexpected panic error: %v", result.err)
 	}
 }
 
