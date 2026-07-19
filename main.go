@@ -136,8 +136,9 @@ type envelope struct {
 }
 
 type envelopeError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code       string `json:"code"`
+	Message    string `json:"message"`
+	HTTPStatus int    `json:"http_status,omitempty"`
 }
 
 func okEnvelope(v any) ([]byte, error) {
@@ -149,7 +150,15 @@ func okEnvelope(v any) ([]byte, error) {
 }
 
 func errorEnvelope(code, message string) []byte {
-	raw, _ := json.Marshal(envelope{OK: false, Error: &envelopeError{Code: code, Message: message}})
+	return errorEnvelopeWithStatus(code, message, 0)
+}
+
+func errorEnvelopeWithStatus(code, message string, httpStatus int) []byte {
+	raw, _ := json.Marshal(envelope{OK: false, Error: &envelopeError{
+		Code:       code,
+		Message:    message,
+		HTTPStatus: httpStatus,
+	}})
 	return raw
 }
 
