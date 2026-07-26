@@ -220,6 +220,11 @@ func pluginRegistration() registration {
 					Description: "Largest 518n-2 truncation tier eligible for continuation. Defaults to 6. Set 0 for no upper tier limit.",
 				},
 				{
+					Name:        "max_concurrent_streams",
+					Type:        pluginapi.ConfigFieldTypeInteger,
+					Description: "Maximum number of concurrent streaming executions held by the plugin. Defaults to 16. Excess requests fail fast with HTTP 503 so blocked synchronous host callbacks cannot accumulate without bound. Must be at least 1.",
+				},
+				{
 					Name:        "debug_log",
 					Type:        pluginapi.ConfigFieldTypeBoolean,
 					Description: "Enable debug logs through CPA host logging. Defaults to false.",
