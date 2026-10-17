@@ -379,6 +379,21 @@ jobs:
           fi
           echo "CPA_TAG=$CPA_SDK_TAG" >> "$GITHUB_ENV"
 
+      - name: Prepare FreeBSD build inputs
+        run: |
+          set -euo pipefail
+          mkdir -p .ci-freebsd
+          git clone --depth 1 --branch "$CPA_SDK_TAG" https://github.com/router-for-me/CLIProxyAPI.git "$RUNNER_TEMP/CLIProxyAPI"
+          tar -czf .ci-freebsd/sdk.tar.gz -C "$RUNNER_TEMP/CLIProxyAPI" .
+          archive="go${GO_VERSION}.freebsd-amd64.tar.gz"
+          curl -fsSL 'https://go.dev/dl/?mode=json&include=all' -o "$RUNNER_TEMP/go-downloads.json"
+          expected=$(jq -r --arg version "go${GO_VERSION}" --arg filename "$archive" \
+            '.[] | select(.version == $version) | .files[] | select(.filename == $filename) | .sha256' \
+            "$RUNNER_TEMP/go-downloads.json")
+          test -n "$expected" && test "$expected" != null
+          curl -fsSL "https://go.dev/dl/$archive" -o .ci-freebsd/go.tar.gz
+          echo "$expected  .ci-freebsd/go.tar.gz" | sha256sum -c -
+
       - name: Build, test, and smoke test in FreeBSD amd64
         uses: vmactions/freebsd-vm@5a72679103d223925653750faa878a143340fbd0
         with:
@@ -386,25 +401,15 @@ jobs:
           arch: x86_64
           usesh: true
           envs: 'VERSION CPA_TAG GO_VERSION'
-          prepare: pkg install -y git jq zip
           run: |
             set -eu
-            GO_ARCHIVE="go${GO_VERSION}.freebsd-amd64.tar.gz"
-            fetch -o /tmp/go-downloads.json 'https://go.dev/dl/?mode=json&include=all'
-            EXPECTED_GO_SHA256=$(jq -r \
-              --arg version "go${GO_VERSION}" \
-              --arg filename "$GO_ARCHIVE" \
-              '.[] | select(.version == $version) | .files[] | select(.filename == $filename) | .sha256' \
-              /tmp/go-downloads.json)
-            test -n "$EXPECTED_GO_SHA256" && test "$EXPECTED_GO_SHA256" != "null"
-            fetch -o /tmp/go.tar.gz "https://go.dev/dl/${GO_ARCHIVE}"
-            test "$(sha256 -q /tmp/go.tar.gz)" = "$EXPECTED_GO_SHA256"
             rm -rf /usr/local/go
-            tar -C /usr/local -xzf /tmp/go.tar.gz
+            tar -C /usr/local -xzf .ci-freebsd/go.tar.gz
             export PATH="/usr/local/go/bin:$PATH"
 
             rm -rf /tmp/CLIProxyAPI
-            git clone --depth 1 --branch "$CPA_TAG" https://github.com/router-for-me/CLIProxyAPI.git /tmp/CLIProxyAPI
+            mkdir -p /tmp/CLIProxyAPI
+            tar -C /tmp/CLIProxyAPI -xzf .ci-freebsd/sdk.tar.gz
             go mod edit -replace="github.com/router-for-me/CLIProxyAPI/v7=/tmp/CLIProxyAPI"
             go mod tidy
             go test -buildvcs=false ./...
@@ -435,7 +440,9 @@ jobs:
             EOF
             cc /tmp/codexcomp-smoke.c -ldl -o /tmp/codexcomp-smoke
             /tmp/codexcomp-smoke
-            zip "codexcomp_${VERSION}_freebsd_amd64.zip" codexcomp.so
+
+      - name: Package zip
+        run: zip "codexcomp_${VERSION}_freebsd_amd64.zip" codexcomp.so
 
       - uses: actions/upload-artifact@v4
         with:
