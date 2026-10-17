@@ -232,11 +232,14 @@ func pluginRegistration() registration {
 			},
 		},
 		Capabilities: registrationCapability{
-			ModelRouter:           true,
-			Executor:              true,
-			ExecutorModelScope:    string(pluginapi.ExecutorModelScopeBoth),
-			ExecutorInputFormats:  []string{"codex"},
-			ExecutorOutputFormats: []string{"codex"},
+			ModelRouter:          true,
+			Executor:             true,
+			ExecutorModelScope:   string(pluginapi.ExecutorModelScopeBoth),
+			ExecutorInputFormats: []string{"codex"},
+			// Folded response.* events are already valid Responses SSE. Advertising
+			// this avoids a redundant Codex-to-Responses translation: CPA 8.0.28
+			// drops unchanged translated frames as registry fallbacks.
+			ExecutorOutputFormats: []string{"codex", "openai-response"},
 		},
 	}
 }
