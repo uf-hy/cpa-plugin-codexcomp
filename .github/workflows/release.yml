@@ -13,6 +13,7 @@ permissions:
 
 env:
   GO_VERSION: '1.26.4'
+  CPA_SDK_TAG: 'v7.2.100'
 
 jobs:
   build:
@@ -39,11 +40,11 @@ jobs:
             echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
           fi
 
-      - name: Clone CLIProxyAPI SDK (latest release)
+      - name: Clone CLIProxyAPI SDK (pinned v7)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          CPA_TAG=$(gh api repos/router-for-me/CLIProxyAPI/releases/latest --jq .tag_name)
+          CPA_TAG="$CPA_SDK_TAG"
           echo "Cloning CPA $CPA_TAG"
           git clone --depth 1 --branch "$CPA_TAG" https://github.com/router-for-me/CLIProxyAPI.git "$RUNNER_TEMP/CLIProxyAPI"
 
@@ -148,11 +149,11 @@ jobs:
             echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
           fi
 
-      - name: Clone CLIProxyAPI SDK (latest release)
+      - name: Clone CLIProxyAPI SDK (pinned v7)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          CPA_TAG=$(gh api repos/router-for-me/CLIProxyAPI/releases/latest --jq .tag_name)
+          CPA_TAG="$CPA_SDK_TAG"
           echo "Cloning CPA $CPA_TAG"
           git clone --depth 1 --branch "$CPA_TAG" https://github.com/router-for-me/CLIProxyAPI.git "$RUNNER_TEMP/CLIProxyAPI"
           go mod edit -replace="github.com/router-for-me/CLIProxyAPI/v7=$RUNNER_TEMP/CLIProxyAPI"
@@ -252,12 +253,12 @@ jobs:
           go version
           "$CC" --version
 
-      - name: Clone CLIProxyAPI SDK (latest release)
+      - name: Clone CLIProxyAPI SDK (pinned v7)
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          $cpaTag = gh api repos/router-for-me/CLIProxyAPI/releases/latest --jq .tag_name
+          $cpaTag = $env:CPA_SDK_TAG
           $sdkPath = Join-Path (Split-Path -Parent $env:GITHUB_WORKSPACE) 'CLIProxyAPI'
           Write-Host "Cloning CPA $cpaTag"
           git clone --depth 1 --branch "$cpaTag" 'https://github.com/router-for-me/CLIProxyAPI.git' "$sdkPath"
@@ -376,7 +377,22 @@ jobs:
           else
             echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
           fi
-          echo "CPA_TAG=$(gh api repos/router-for-me/CLIProxyAPI/releases/latest --jq .tag_name)" >> "$GITHUB_ENV"
+          echo "CPA_TAG=$CPA_SDK_TAG" >> "$GITHUB_ENV"
+
+      - name: Prepare FreeBSD build inputs
+        run: |
+          set -euo pipefail
+          mkdir -p .ci-freebsd
+          git clone --depth 1 --branch "$CPA_SDK_TAG" https://github.com/router-for-me/CLIProxyAPI.git "$RUNNER_TEMP/CLIProxyAPI"
+          tar -czf .ci-freebsd/sdk.tar.gz -C "$RUNNER_TEMP/CLIProxyAPI" .
+          archive="go${GO_VERSION}.freebsd-amd64.tar.gz"
+          curl -fsSL 'https://go.dev/dl/?mode=json&include=all' -o "$RUNNER_TEMP/go-downloads.json"
+          expected=$(jq -r --arg version "go${GO_VERSION}" --arg filename "$archive" \
+            '.[] | select(.version == $version) | .files[] | select(.filename == $filename) | .sha256' \
+            "$RUNNER_TEMP/go-downloads.json")
+          test -n "$expected" && test "$expected" != null
+          curl -fsSL "https://go.dev/dl/$archive" -o .ci-freebsd/go.tar.gz
+          echo "$expected  .ci-freebsd/go.tar.gz" | sha256sum -c -
 
       - name: Build, test, and smoke test in FreeBSD amd64
         uses: vmactions/freebsd-vm@5a72679103d223925653750faa878a143340fbd0
@@ -385,25 +401,15 @@ jobs:
           arch: x86_64
           usesh: true
           envs: 'VERSION CPA_TAG GO_VERSION'
-          prepare: pkg install -y git jq zip
           run: |
             set -eu
-            GO_ARCHIVE="go${GO_VERSION}.freebsd-amd64.tar.gz"
-            fetch -o /tmp/go-downloads.json 'https://go.dev/dl/?mode=json&include=all'
-            EXPECTED_GO_SHA256=$(jq -r \
-              --arg version "go${GO_VERSION}" \
-              --arg filename "$GO_ARCHIVE" \
-              '.[] | select(.version == $version) | .files[] | select(.filename == $filename) | .sha256' \
-              /tmp/go-downloads.json)
-            test -n "$EXPECTED_GO_SHA256" && test "$EXPECTED_GO_SHA256" != "null"
-            fetch -o /tmp/go.tar.gz "https://go.dev/dl/${GO_ARCHIVE}"
-            test "$(sha256 -q /tmp/go.tar.gz)" = "$EXPECTED_GO_SHA256"
             rm -rf /usr/local/go
-            tar -C /usr/local -xzf /tmp/go.tar.gz
+            tar -C /usr/local -xzf .ci-freebsd/go.tar.gz
             export PATH="/usr/local/go/bin:$PATH"
 
             rm -rf /tmp/CLIProxyAPI
-            git clone --depth 1 --branch "$CPA_TAG" https://github.com/router-for-me/CLIProxyAPI.git /tmp/CLIProxyAPI
+            mkdir -p /tmp/CLIProxyAPI
+            tar -C /tmp/CLIProxyAPI -xzf .ci-freebsd/sdk.tar.gz
             go mod edit -replace="github.com/router-for-me/CLIProxyAPI/v7=/tmp/CLIProxyAPI"
             go mod tidy
             go test -buildvcs=false ./...
@@ -434,15 +440,39 @@ jobs:
             EOF
             cc /tmp/codexcomp-smoke.c -ldl -o /tmp/codexcomp-smoke
             /tmp/codexcomp-smoke
-            zip "codexcomp_${VERSION}_freebsd_amd64.zip" codexcomp.so
+
+      - name: Package zip
+        run: zip "codexcomp_${VERSION}_freebsd_amd64.zip" codexcomp.so
 
       - uses: actions/upload-artifact@v4
         with:
           name: codexcomp-freebsd-amd64
           path: codexcomp_*.zip
 
+  responses-compat:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: codexcomp-linux-amd64
+          path: artifacts
+      - name: Check Responses compatibility with CPA 8.0.28
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/cpa" "$RUNNER_TEMP/plugin"
+          gh release download v8.0.28 --repo router-for-me/CLIProxyAPI \
+            --pattern CLIProxyAPI_8.0.28_linux_amd64.tar.gz --dir "$RUNNER_TEMP/cpa"
+          tar -xzf "$RUNNER_TEMP/cpa/CLIProxyAPI_8.0.28_linux_amd64.tar.gz" -C "$RUNNER_TEMP/cpa"
+          unzip artifacts/codexcomp_*.zip -d "$RUNNER_TEMP/plugin"
+          python3 scripts/check_responses_compat.py \
+            --cpa "$RUNNER_TEMP/cpa/cli-proxy-api" --plugin "$RUNNER_TEMP/plugin/codexcomp.so"
+
   release:
-    needs: [build, build-darwin, build-windows, build-freebsd]
+    needs: [build, build-darwin, build-windows, build-freebsd, responses-compat]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
