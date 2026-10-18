@@ -494,48 +494,192 @@ func TestErrorEnvelopeWithStatus(t *testing.T) {
 	}
 }
 
+func TestExecuteStreamReturns503WhenConcurrencyLimitIsReached(t *testing.T) {
+	if got := activeStreamExecutions.activeCount(); got != 0 {
+		t.Fatalf("global stream limiter is not clean before test: active=%d", got)
+	}
+	previous := currentFoldConfig()
+	defer setFoldConfig(previous)
+	cfg := defaultFoldConfig()
+	cfg.MaxConcurrentStreams = 1
+	setFoldConfig(cfg)
+
+	if !activeStreamExecutions.tryAcquire(cfg.MaxConcurrentStreams) {
+		t.Fatal("failed to occupy the only stream execution slot")
+	}
+	defer activeStreamExecutions.release()
+
+	req := rpcExecutorRequest{
+		ExecutorRequest: pluginapi.ExecutorRequest{
+			Model:           "gpt-5.6-luna",
+			Stream:          true,
+			OriginalRequest: []byte(`{"input":[]}`),
+		},
+		StreamID: "downstream-1",
+	}
+	raw, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := executeStream(raw)
+	if err != nil {
+		t.Fatalf("executeStream returned Go error: %v", err)
+	}
+
+	var got envelope
+	if err := json.Unmarshal(response, &got); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	if got.OK || got.Error == nil {
+		t.Fatalf("expected overload error envelope, got %#v", got)
+	}
+	if got.Error.Code != "executor_busy" {
+		t.Fatalf("error code = %q, want executor_busy", got.Error.Code)
+	}
+	if got.Error.HTTPStatus != http.StatusServiceUnavailable {
+		t.Fatalf("http_status = %d, want %d", got.Error.HTTPStatus, http.StatusServiceUnavailable)
+	}
+	if active := activeStreamExecutions.activeCount(); active != 1 {
+		t.Fatalf("rejected request changed active count to %d, want 1", active)
+	}
+}
+
+func TestExecuteStreamReleasesSlotAfterImmediateHostError(t *testing.T) {
+	if got := activeStreamExecutions.activeCount(); got != 0 {
+		t.Fatalf("global stream limiter is not clean before test: active=%d", got)
+	}
+	previous := currentFoldConfig()
+	defer setFoldConfig(previous)
+	cfg := defaultFoldConfig()
+	cfg.MaxConcurrentStreams = 1
+	setFoldConfig(cfg)
+
+	req := rpcExecutorRequest{
+		ExecutorRequest: pluginapi.ExecutorRequest{
+			Model:           "gpt-5.6-luna",
+			Stream:          true,
+			OriginalRequest: []byte(`{"input":[]}`),
+		},
+		StreamID: "downstream-1",
+	}
+	raw, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := executeStream(raw)
+	if err != nil {
+		t.Fatalf("executeStream returned Go error: %v", err)
+	}
+
+	var got envelope
+	if err := json.Unmarshal(response, &got); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	if got.OK || got.Error == nil || got.Error.Code != "executor_error" {
+		t.Fatalf("expected immediate host error envelope, got %#v", got)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for activeStreamExecutions.activeCount() != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if active := activeStreamExecutions.activeCount(); active != 0 {
+		t.Fatalf("immediate host error leaked %d execution slot(s)", active)
+	}
+}
+
 func TestProbeRoundStartImmediateError(t *testing.T) {
 	want := errors.New("no provider")
-	_, result := probeRoundStart(func() (hostModelStreamResponse, error) {
-		return hostModelStreamResponse{}, want
-	}, time.Second)
+	continued := make(chan struct{}, 1)
+	done := make(chan struct{})
+	result := probeRoundStart(
+		func() (hostModelStreamResponse, error) {
+			return hostModelStreamResponse{}, want
+		},
+		time.Second,
+		func(roundStartResult) {
+			continued <- struct{}{}
+		},
+		func() {
+			close(done)
+		},
+	)
 	if result == nil {
 		t.Fatal("expected immediate result")
 	}
 	if !errors.Is(result.err, want) {
 		t.Fatalf("error = %v, want %v", result.err, want)
 	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("worker did not release its execution slot")
+	}
+	select {
+	case <-continued:
+		t.Fatal("worker must not continue after an immediate startup error")
+	default:
+	}
 }
 
 func TestProbeRoundStartDelayedSuccess(t *testing.T) {
 	release := make(chan struct{})
-	results, immediate := probeRoundStart(func() (hostModelStreamResponse, error) {
-		<-release
-		return hostModelStreamResponse{StatusCode: http.StatusOK, StreamID: "upstream-1"}, nil
-	}, time.Millisecond)
+	continued := make(chan roundStartResult, 1)
+	done := make(chan struct{})
+	immediate := probeRoundStart(
+		func() (hostModelStreamResponse, error) {
+			<-release
+			return hostModelStreamResponse{StatusCode: http.StatusOK, StreamID: "upstream-1"}, nil
+		},
+		time.Millisecond,
+		func(result roundStartResult) {
+			continued <- result
+		},
+		func() {
+			close(done)
+		},
+	)
 	if immediate != nil {
 		t.Fatalf("expected pending result, got %#v", immediate)
 	}
 	close(release)
 	select {
-	case result := <-results:
+	case result := <-continued:
 		if result.err != nil || result.response.StreamID != "upstream-1" {
 			t.Fatalf("unexpected result: %#v", result)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for delayed result")
 	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("worker did not release its execution slot")
+	}
 }
 
 func TestProbeRoundStartConvertsPanic(t *testing.T) {
-	_, result := probeRoundStart(func() (hostModelStreamResponse, error) {
-		panic("boom")
-	}, time.Second)
+	done := make(chan struct{})
+	result := probeRoundStart(
+		func() (hostModelStreamResponse, error) {
+			panic("boom")
+		},
+		time.Second,
+		nil,
+		func() {
+			close(done)
+		},
+	)
 	if result == nil || result.err == nil {
 		t.Fatalf("expected panic error, got %#v", result)
 	}
 	if !strings.Contains(result.err.Error(), "start round panic: boom") {
 		t.Fatalf("unexpected panic error: %v", result.err)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("worker did not release its execution slot")
 	}
 }
 
@@ -583,7 +727,7 @@ func TestApplyLifecycleConfig(t *testing.T) {
 	previous := currentFoldConfig()
 	defer setFoldConfig(previous)
 
-	payload, err := json.Marshal(lifecycleRequest{ConfigYAML: []byte("marker_text: Custom marker\nmax_continue: 5\nmax_tier_n: 8\ndebug_log: true\nmodels:\n  - ' gpt-5.6-luna '\n  - gpt-5.6-terra")})
+	payload, err := json.Marshal(lifecycleRequest{ConfigYAML: []byte("marker_text: Custom marker\nmax_continue: 5\nmax_tier_n: 8\nmax_concurrent_streams: 7\ndebug_log: true\nmodels:\n  - ' gpt-5.6-luna '\n  - gpt-5.6-terra")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -600,6 +744,9 @@ func TestApplyLifecycleConfig(t *testing.T) {
 	if cfg.MaxTierN != 8 {
 		t.Errorf("MaxTierN = %d", cfg.MaxTierN)
 	}
+	if cfg.MaxConcurrentStreams != 7 {
+		t.Errorf("MaxConcurrentStreams = %d", cfg.MaxConcurrentStreams)
+	}
 	if !cfg.DebugLog {
 		t.Error("DebugLog should be true")
 	}
@@ -612,13 +759,13 @@ func TestApplyLifecycleConfigEmptyRawInstallsDefaults(t *testing.T) {
 	previous := currentFoldConfig()
 	defer setFoldConfig(previous)
 
-	setFoldConfig(foldConfig{MarkerText: "stale", MaxContinue: 99, MaxTierN: 99, DebugLog: true})
+	setFoldConfig(foldConfig{MarkerText: "stale", MaxContinue: 99, MaxTierN: 99, MaxConcurrentStreams: 99, DebugLog: true})
 	if err := applyLifecycleConfig(nil); err != nil {
 		t.Fatalf("empty raw should not error: %v", err)
 	}
 	cfg := currentFoldConfig()
 	defaults := defaultFoldConfig()
-	if cfg.MarkerText != defaults.MarkerText || cfg.MaxContinue != defaults.MaxContinue || cfg.MaxTierN != defaults.MaxTierN || cfg.DebugLog != defaults.DebugLog {
+	if cfg.MarkerText != defaults.MarkerText || cfg.MaxContinue != defaults.MaxContinue || cfg.MaxTierN != defaults.MaxTierN || cfg.MaxConcurrentStreams != defaults.MaxConcurrentStreams || cfg.DebugLog != defaults.DebugLog {
 		t.Errorf("empty raw should install defaults, got %+v", cfg)
 	}
 	if !reflect.DeepEqual(cfg.Models, defaults.Models) {
@@ -627,11 +774,11 @@ func TestApplyLifecycleConfigEmptyRawInstallsDefaults(t *testing.T) {
 }
 
 func TestDecodeFoldConfigFromJSON(t *testing.T) {
-	cfg, err := decodeFoldConfig([]byte(`{"marker_text":"JSON marker","max_continue":2,"max_tier_n":0,"debug_log":true,"models":["gpt-5.6-sol"]}`))
+	cfg, err := decodeFoldConfig([]byte(`{"marker_text":"JSON marker","max_continue":2,"max_tier_n":0,"max_concurrent_streams":4,"debug_log":true,"models":["gpt-5.6-sol"]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.MarkerText != "JSON marker" || cfg.MaxContinue != 2 || cfg.MaxTierN != 0 || !cfg.DebugLog {
+	if cfg.MarkerText != "JSON marker" || cfg.MaxContinue != 2 || cfg.MaxTierN != 0 || cfg.MaxConcurrentStreams != 4 || !cfg.DebugLog {
 		t.Fatalf("unexpected config: %+v", cfg)
 	}
 	if len(cfg.Models) != 1 || cfg.Models[0] != "gpt-5.6-sol" {
@@ -643,6 +790,8 @@ func TestDecodeFoldConfigRejectsInvalidValues(t *testing.T) {
 	for _, raw := range [][]byte{
 		[]byte("max_continue: -1"),
 		[]byte("max_tier_n: nope"),
+		[]byte("max_concurrent_streams: 0"),
+		[]byte("max_concurrent_streams: -1"),
 		[]byte("debug_log: maybe"),
 	} {
 		if _, err := decodeFoldConfig(raw); err == nil {
@@ -684,6 +833,26 @@ func TestPluginRegistrationExperimentalThresholdDescription(t *testing.T) {
 	}
 	if strings.Contains(field.Description, `"`) || strings.Contains(field.Description, "&#34;") {
 		t.Errorf("description must avoid quote entities in management UI: %q", field.Description)
+	}
+}
+
+func TestPluginRegistrationMaxConcurrentStreams(t *testing.T) {
+	reg := pluginRegistration()
+	var field *pluginapi.ConfigField
+	for i := range reg.Metadata.ConfigFields {
+		if reg.Metadata.ConfigFields[i].Name == "max_concurrent_streams" {
+			field = &reg.Metadata.ConfigFields[i]
+			break
+		}
+	}
+	if field == nil {
+		t.Fatal("max_concurrent_streams config field not registered")
+	}
+	if field.Type != pluginapi.ConfigFieldTypeInteger {
+		t.Errorf("field type = %q, want integer", field.Type)
+	}
+	if !strings.Contains(field.Description, "Defaults to 16") || !strings.Contains(field.Description, "HTTP 503") {
+		t.Errorf("description must document the default and overload behavior: %q", field.Description)
 	}
 }
 

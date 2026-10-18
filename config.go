@@ -12,20 +12,22 @@ import (
 const defaultMarkerText = "Continue thinking..."
 
 const (
-	defaultTruncationStep = 518
-	defaultMaxTierN       = 6
-	defaultMaxContinue    = 3
+	defaultTruncationStep       = 518
+	defaultMaxTierN             = 6
+	defaultMaxContinue          = 3
+	defaultMaxConcurrentStreams = 16
 )
 
 // foldConfig mirrors cpa-model-fallback-router's pluginConfig pattern:
 // yaml-tagged struct, decoded by yaml.Unmarshal, normalized and validated.
 type foldConfig struct {
-	MarkerText         string         `yaml:"marker_text"`
-	MaxTierN           int            `yaml:"max_tier_n"`
-	MaxContinue        int            `yaml:"max_continue"`
-	DebugLog           bool           `yaml:"debug_log"`
-	Models             []string       `yaml:"models"`
-	MinReasoningTokens map[string]int `yaml:"min_reasoning_tokens"`
+	MarkerText           string         `yaml:"marker_text"`
+	MaxTierN             int            `yaml:"max_tier_n"`
+	MaxContinue          int            `yaml:"max_continue"`
+	MaxConcurrentStreams int            `yaml:"max_concurrent_streams"`
+	DebugLog             bool           `yaml:"debug_log"`
+	Models               []string       `yaml:"models"`
+	MinReasoningTokens   map[string]int `yaml:"min_reasoning_tokens"`
 }
 
 var globalFoldConfig atomic.Value
@@ -51,17 +53,18 @@ func applyLifecycleConfig(raw []byte) error {
 	}
 	setFoldConfig(cfg)
 	if cfg.DebugLog {
-		pluginLog("debug", fmt.Sprintf("config applied: max_tier_n=%d max_continue=%d marker_text_len=%d", cfg.MaxTierN, cfg.MaxContinue, len(cfg.MarkerText)))
+		pluginLog("debug", fmt.Sprintf("config applied: max_tier_n=%d max_continue=%d max_concurrent_streams=%d marker_text_len=%d", cfg.MaxTierN, cfg.MaxContinue, cfg.MaxConcurrentStreams, len(cfg.MarkerText)))
 	}
 	return nil
 }
 
 func defaultFoldConfig() foldConfig {
 	return foldConfig{
-		MarkerText:  defaultMarkerText,
-		MaxTierN:    defaultMaxTierN,
-		MaxContinue: defaultMaxContinue,
-		Models:      defaultModels(),
+		MarkerText:           defaultMarkerText,
+		MaxTierN:             defaultMaxTierN,
+		MaxContinue:          defaultMaxContinue,
+		MaxConcurrentStreams: defaultMaxConcurrentStreams,
+		Models:               defaultModels(),
 	}
 }
 
@@ -140,6 +143,9 @@ func validateFoldConfig(cfg foldConfig) error {
 	}
 	if cfg.MaxContinue < 0 {
 		return fmt.Errorf("max_continue must be a non-negative integer")
+	}
+	if cfg.MaxConcurrentStreams < 1 {
+		return fmt.Errorf("max_concurrent_streams must be a positive integer")
 	}
 	for model, threshold := range cfg.MinReasoningTokens {
 		if threshold < 0 {

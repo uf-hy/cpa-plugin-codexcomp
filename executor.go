@@ -258,7 +258,22 @@ func executeStream(raw []byte) ([]byte, error) {
 	}
 
 	fs := newFoldState(baseBody, origInput, req, req.HostCallbackID)
-	firstRoundCh, firstRound := probeRoundStart(fs.startRound, startupProbeWindow)
+	if !activeStreamExecutions.tryAcquire(fs.config.MaxConcurrentStreams) {
+		return errorEnvelopeWithStatus(
+			"executor_busy",
+			fmt.Sprintf("codexcomp has reached max_concurrent_streams=%d", fs.config.MaxConcurrentStreams),
+			http.StatusServiceUnavailable,
+		), nil
+	}
+
+	firstRound := probeRoundStart(
+		fs.startRound,
+		startupProbeWindow,
+		func(result roundStartResult) {
+			runFoldSafely(fs, result, streamID)
+		},
+		activeStreamExecutions.release,
+	)
 	if firstRound != nil && firstRound.err != nil {
 		status := http.StatusBadGateway
 		if upstreamErr, ok := firstRound.err.(*upstreamError); ok {
@@ -266,44 +281,58 @@ func executeStream(raw []byte) ([]byte, error) {
 		}
 		return errorEnvelopeWithStatus("executor_error", firstRound.err.Error(), status), nil
 	}
-	if firstRound != nil {
-		firstRoundCh <- *firstRound
-	}
-	runFoldAsync(fs, firstRoundCh, streamID)
 
 	return okEnvelope(map[string]any{
 		"headers": http.Header{"Content-Type": []string{"text/event-stream"}},
 	})
 }
 
-func probeRoundStart(start func() (hostModelStreamResponse, error), window time.Duration) (chan roundStartResult, *roundStartResult) {
-	firstRoundCh := make(chan roundStartResult, 1)
+// probeRoundStart starts one background worker for the complete stream
+// lifecycle. It waits briefly so an immediate upstream error can still be
+// returned synchronously to CPA. If startup takes longer, the same worker
+// continues into run rather than spawning a second goroutine that waits for it.
+func probeRoundStart(
+	start func() (hostModelStreamResponse, error),
+	window time.Duration,
+	run func(roundStartResult),
+	done func(),
+) *roundStartResult {
+	resultCh := make(chan roundStartResult, 1)
+	proceedCh := make(chan bool, 1)
 	go func() {
+		if done != nil {
+			defer done()
+		}
 		result := roundStartResult{}
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				result.err = fmt.Errorf("start round panic: %v", recovered)
 			}
-			firstRoundCh <- result
+			resultCh <- result
+			if <-proceedCh && run != nil {
+				run(result)
+			}
 		}()
 		result.response, result.err = start()
 	}()
 
 	timer := time.NewTimer(window)
 	defer timer.Stop()
-	var firstRound *roundStartResult
 	select {
-	case result := <-firstRoundCh:
-		firstRound = &result
+	case result := <-resultCh:
+		proceedCh <- result.err == nil
+		return &result
 	case <-timer.C:
 		// Prefer a startup result that completed at the probe boundary.
 		select {
-		case result := <-firstRoundCh:
-			firstRound = &result
+		case result := <-resultCh:
+			proceedCh <- result.err == nil
+			return &result
 		default:
+			proceedCh <- true
+			return nil
 		}
 	}
-	return firstRoundCh, firstRound
 }
 
 type roundStartResult struct {
@@ -311,17 +340,15 @@ type roundStartResult struct {
 	err      error
 }
 
-func runFoldAsync(fs *foldState, firstRound <-chan roundStartResult, streamID string) {
-	go func() {
-		closeErr := ""
-		defer func() {
-			if recovered := recover(); recovered != nil {
-				closeErr = fmt.Sprintf("fold panic: %v", recovered)
-			}
-			closeStreamSafely(streamID, closeErr)
-		}()
-		runFold(fs, <-firstRound, streamID)
+func runFoldSafely(fs *foldState, firstRound roundStartResult, streamID string) {
+	closeErr := ""
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			closeErr = fmt.Sprintf("fold panic: %v", recovered)
+		}
+		closeStreamSafely(streamID, closeErr)
 	}()
+	runFold(fs, firstRound, streamID)
 }
 
 func closeStreamSafely(streamID, errMsg string) {
